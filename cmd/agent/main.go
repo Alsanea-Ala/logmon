@@ -1,11 +1,10 @@
-package agent
+package main
 
 import (
 	"fmt"
 	"log"
 	"os"
 	"time"
-
 	"github.com/nxadm/tail"
 )
 
@@ -40,4 +39,14 @@ func GenLogs(logFilePath string) {
 		counter++
 		time.Sleep(time.Millisecond * time.Duration(counter))
 	}
+}
+
+func main() {
+
+	logPathFile := "app.log"
+	go DispayLogs(logPathFile)
+	GenLogs(logPathFile)
+
+	fmt.Println("end")
+
 }
