@@ -4,7 +4,11 @@ import (
 	"fmt"
 	"log"
 	"os"
+	// "path/filepath"
+	"sync"
 	"time"
+
+	"github.com/Alsanea-Ala/logmon/internal/agent"
 	"github.com/nxadm/tail"
 )
 
@@ -41,12 +45,52 @@ func GenLogs(logFilePath string) {
 	}
 }
 
+// func getConfigPath() string {
+// 	exe, err := os.Executable()
+// 	if err != nil {
+// 		return "agent.yaml"
+// 	}
+
+// 	if filepath.Dir(exe) == os.TempDir() {
+// 		return "agent.yaml"
+// 	}
+
+// 	return filepath.Join(filepath.Dir(exe), "agent.yaml")
+// }
+
 func main() {
 
-	logPathFile := "app.log"
-	go DispayLogs(logPathFile)
-	GenLogs(logPathFile)
+	// configPath := getConfigPath()
+	const configPath = "./agent.yaml"
 
+	log.Println("configPath: ", configPath)
+
+	if err := agent.GenerateConfig(configPath); err != nil {
+		log.Fatal("failed to generate config:", err)
+	}
+
+	cfg, err := agent.LoadConfig(configPath)
+	if err != nil {
+		log.Fatal("failed to load config:", err)
+	}
+
+	// for testing
+	var wg sync.WaitGroup
+
+	for _, logFile := range cfg.Logs {
+		wg.Add(2)
+		go func(path string) {
+			defer wg.Done()
+			DispayLogs(path)
+		}(logFile.Path)
+
+		go func(path string) {
+			defer wg.Done()
+			GenLogs(path)
+		}(logFile.Path)
+	}
+
+	wg.Wait()
 	fmt.Println("end")
 
 }
