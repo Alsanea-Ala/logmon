@@ -2,7 +2,10 @@ module github.com/Alsanea-Ala/logmon
 
 go 1.25.7
 
-require github.com/nxadm/tail v1.4.11
+require (
+	github.com/nxadm/tail v1.4.11
+	gopkg.in/yaml.v3 v3.0.1
+)
 
 require (
 	github.com/fsnotify/fsnotify v1.6.0 // indirect
