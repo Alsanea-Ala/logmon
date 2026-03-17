@@ -1,0 +1,10 @@
+pre-commit:
+  parallel: true
+  commands:
+    fmt:
+      run: make fmt
+      stage_fixed: true
+    vet:
+      run: make vet
+    lint:
+      run: make lint

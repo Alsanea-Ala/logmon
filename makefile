@@ -11,7 +11,7 @@ MIN_GO_VERSION = 1.21
 # ====================================Setup==============================================
 
 .PHONY: setup
-setup: check/go install/lint tidy
+setup: check/go install/lint tidy setup/hooks
 	@echo "Setup complete — ready to develop!"
 
 check/go:
@@ -42,6 +42,14 @@ tidy:
 	@echo "Running go mod tidy..."
 	@$(GO) mod tidy
 	@echo "Dependencies tidied"
+
+setup/hooks:
+	@echo "Installing lefthook..."
+	@go install github.com/evilmartians/lefthook@latest
+	@echo "✅ lefthook installed"
+	@echo "Installing git hooks..."
+	@lefthook install
+	@echo "✅ Git hooks installed"
 
 # ====================================Run==============================================
 .PHONY: run/agent run/server
