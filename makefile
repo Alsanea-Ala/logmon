@@ -89,7 +89,8 @@ clean/bin:
 	rm -rf ./bin
 
 clean/conf:
-	rm -f agent.yaml server.yaml app.log
+# 	rm -f agent.yaml server.yaml *.log
+	rm -f  *.log
 
 # ====================================Helpers==========================================
 .PHONY: help
