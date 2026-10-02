@@ -82,6 +82,7 @@ func TestConfigValidate(t *testing.T) {
 	valid := func() Config {
 		return Config{
 			ID:         "prod-1",
+			Hostname:   "api-01",
 			Server:     "logs:9000",
 			Token:      strings.Repeat("a", 32),
 			RetryDelay: time.Second,
@@ -89,21 +90,25 @@ func TestConfigValidate(t *testing.T) {
 		}
 	}
 	tests := []struct {
-		name   string
-		mutate func(*Config)
+		name    string
+		mutate  func(*Config)
+		wantErr bool
 	}{
-		{"valid", func(*Config) {}},
-		{"invalid id", func(cfg *Config) { cfg.ID = "../prod" }},
-		{"missing server", func(cfg *Config) { cfg.Server = "" }},
-		{"short token", func(cfg *Config) { cfg.Token = "short" }},
-		{"invalid retry delay", func(cfg *Config) { cfg.RetryDelay = 0 }},
-		{"no sources", func(cfg *Config) { cfg.Sources = nil }},
-		{"invalid app", func(cfg *Config) { cfg.Sources[0].App = "bad/app" }},
-		{"missing category", func(cfg *Config) { cfg.Sources[0].Category = "" }},
-		{"missing file", func(cfg *Config) { cfg.Sources[0].Path = "" }},
-		{"missing journal unit", func(cfg *Config) { cfg.Sources[0] = Source{Type: "journald", App: "app", Category: "service"} }},
-		{"missing container", func(cfg *Config) { cfg.Sources[0] = Source{Type: "docker", App: "app", Category: "container"} }},
-		{"unknown source", func(cfg *Config) { cfg.Sources[0].Type = "syslog" }},
+		{"valid", func(*Config) {}, false},
+		{"invalid id", func(cfg *Config) { cfg.ID = "../prod" }, true},
+		{"missing hostname", func(cfg *Config) { cfg.Hostname = "" }, true},
+		{"oversized hostname", func(cfg *Config) { cfg.Hostname = strings.Repeat("a", 256) }, true},
+		{"max length hostname", func(cfg *Config) { cfg.Hostname = strings.Repeat("a", 255) }, false},
+		{"missing server", func(cfg *Config) { cfg.Server = "" }, true},
+		{"short token", func(cfg *Config) { cfg.Token = "short" }, true},
+		{"invalid retry delay", func(cfg *Config) { cfg.RetryDelay = 0 }, true},
+		{"no sources", func(cfg *Config) { cfg.Sources = nil }, true},
+		{"invalid app", func(cfg *Config) { cfg.Sources[0].App = "bad/app" }, true},
+		{"missing category", func(cfg *Config) { cfg.Sources[0].Category = "" }, true},
+		{"missing file", func(cfg *Config) { cfg.Sources[0].Path = "" }, true},
+		{"missing journal unit", func(cfg *Config) { cfg.Sources[0] = Source{Type: "journald", App: "app", Category: "service"} }, true},
+		{"missing container", func(cfg *Config) { cfg.Sources[0] = Source{Type: "docker", App: "app", Category: "container"} }, true},
+		{"unknown source", func(cfg *Config) { cfg.Sources[0].Type = "syslog" }, true},
 	}
 
 	for _, test := range tests {
@@ -111,11 +116,11 @@ func TestConfigValidate(t *testing.T) {
 			cfg := valid()
 			test.mutate(&cfg)
 			err := cfg.Validate()
-			if test.name == "valid" && err != nil {
-				t.Fatal(err)
-			}
-			if test.name != "valid" && err == nil {
+			if test.wantErr && err == nil {
 				t.Fatal("expected validation error")
+			}
+			if !test.wantErr && err != nil {
+				t.Fatal(err)
 			}
 		})
 	}
