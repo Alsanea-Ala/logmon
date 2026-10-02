@@ -1,0 +1,40 @@
+# Logmon server configuration.
+#
+# Copy to server.yaml and replace every <...> placeholder:
+#
+#   cp examples/server.example.yaml server.yaml
+#
+# Unknown keys are rejected at startup, so a typo here fails loudly rather
+# than being silently ignored.
+
+# TCP bind address for agent connections. Bind this to a VPN or private
+# interface address, not 0.0.0.0, unless the port is firewalled to agent
+# hosts. Transport is plaintext.
+listen: 127.0.0.1:9000
+
+# Storage root for dated JSONL files. Relative values resolve from this
+# config file's directory, not the process working directory.
+# Logmon never deletes stored data; see the retention notes in README.md.
+data_dir: data
+
+# Maximum simultaneous accepted agent connections. Connections beyond this
+# limit are refused. Sized for the sub-50-agent target.
+max_connections: 100
+
+# Required. The allowlist of agents permitted to connect. Each entry maps an
+# agent ID to the SHA-256 hex digest of its token. The server stores only the
+# digest, never the token itself.
+#
+# Generate a token and its digest:
+#
+#   TOKEN="$(openssl rand -hex 32)"
+#   printf '%s' "$TOKEN" | sha256sum
+#
+# Use printf, not echo. echo appends a newline and produces a different
+# digest, which is the most common setup failure.
+agents:
+  prod-1:
+    token_sha256: "<64-character-sha256-hex-digest>"
+
+  # prod-2:
+  #   token_sha256: "<64-character-sha256-hex-digest>"

@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/Alsanea-Ala/logmon/security/advisories/new
+    about: Report privately. Do not open a public issue.
+  - name: Troubleshooting guide
+    url: https://github.com/Alsanea-Ala/logmon#troubleshooting
+    about: Silent-failure symptoms are listed there before filing an issue.
+  - name: Known limitations
+    url: https://github.com/Alsanea-Ala/logmon#limitations
+    about: Check whether the behaviour is already a documented limitation.
