@@ -1,3 +1,12 @@
+```text
+██╗      ██████╗  ██████╗ ███╗   ███╗ ██████╗ ███╗   ██╗
+██║     ██╔═══██╗██╔════╝ ████╗ ████║██╔═══██╗████╗  ██║
+██║     ██║   ██║██║  ███╗██╔████╔██║██║   ██║██╔██╗ ██║
+██║     ██║   ██║██║   ██║██║╚██╔╝██║██║   ██║██║╚██╗██║
+███████╗╚██████╔╝╚██████╔╝██║ ╚═╝ ██║╚██████╔╝██║ ╚████║
+╚══════╝ ╚═════╝  ╚═════╝ ╚═╝     ╚═╝ ╚═════╝ ╚═╝  ╚═══╝
+```
+
 # Logmon
 
 Logmon collects Linux application logs through small agents, sends them to one central server over raw TCP, stores them as dated JSONL files, and exposes them in a Bubble Tea terminal UI.
