@@ -1179,14 +1179,6 @@ func connectedCount(agents map[string]agentStatus) int {
 	return count
 }
 
-func truncate(value string, width int) string {
-	runes := []rune(value)
-	if len(runes) <= width {
-		return value
-	}
-	return string(runes[:max(0, width-3)]) + "..."
-}
-
 func safeText(value string) string {
 	return strings.Map(func(r rune) rune {
 		if r < 0x20 || r == 0x7f {
