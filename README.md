@@ -156,8 +156,8 @@ with `go env GOBIN`.
 > from the default branch instead:
 >
 > ```bash
-> go install github.com/Alsanea-Ala/logmon/cmd/server@master
-> go install github.com/Alsanea-Ala/logmon/cmd/agent@master
+> go install github.com/Alsanea-Ala/logmon/cmd/server@main
+> go install github.com/Alsanea-Ala/logmon/cmd/agent@main
 > ```
 >
 > That works but is not reproducible. If you deploy Logmon, build from a pinned
@@ -719,6 +719,9 @@ constraints, and commit message conventions.
 - Bug reports: use the issue templates. Redact tokens and digests.
 - Vulnerabilities: see [SECURITY.md](SECURITY.md). Do not open a public issue.
 - Community expectations: [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+- Merge policy: squash, with a Conventional Commits pull request title, since
+  the release rules read commit subjects directly. See
+  [CONTRIBUTING.md](CONTRIBUTING.md#releases) for how commits become versions.
 
 ## License
 
