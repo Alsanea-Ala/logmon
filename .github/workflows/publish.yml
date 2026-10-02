@@ -1,0 +1,60 @@
+name: publish
+
+# Two entry points:
+#
+#   repository_dispatch  fired by release-tag.yml. Necessary, not optional:
+#     GitHub does not create a workflow run for a tag pushed with
+#     GITHUB_TOKEN, so the automated tag would otherwise publish nothing.
+#     repository_dispatch is one of the two events exempt from that rule.
+#
+#   push tags ["v*"]     so a tag pushed by hand publishes through the same
+#     pipeline without waiting for a commit on main.
+on:
+  repository_dispatch:
+    types: [release-tagged]
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-${{ github.event.repository_dispatch.client_payload.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  goreleaser:
+    name: build and publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Required. GoReleaser builds the changelog from commit history;
+          # a shallow clone makes it emit nothing or fail outright.
+          fetch-depth: 0
+          # repository_dispatch leaves github.ref on the default branch, so
+          # prefer the tag the dispatch carried.
+          ref: ${{ github.event.repository_dispatch.client_payload.tag || github.ref }}
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          # Required. GoReleaser reads its publish token from this variable,
+          # or from ~/.config/goreleaser/github_token. Neither exists on a
+          # runner, so without this the publish step fails. The contents: write
+          # permission above is what makes this token able to create a release.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: checksums
+          path: dist/checksums.txt
