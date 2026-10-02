@@ -113,12 +113,13 @@ Tag-driven, so the version is a human decision:
 git tag v0.1.0 && git push origin v0.1.0
 ```
 
-`lefthook.yml` enforces the subject format on commit-msg.
+The subject format is a convention, not something the toolchain checks. No
+commit-msg hook runs, locally or in CI, so a malformed subject will be accepted.
+Read it back before pushing.
 
-Note: earlier commits in this history use `ref:`, which is not a specification
-type. Those commits are already published and cannot be rewritten without
-rewriting `master`, so `ref:` is accepted for existing history only. New
-refactors must use `refactor:`.
+Earlier commits in this history use `ref:`, which is not a specification type.
+Those commits are published and are not being rewritten. New refactors must use
+`refactor:`.
 
 ## Releases
 
@@ -129,7 +130,7 @@ keeps a reviewed human between choosing a version and publishing binaries.
 
 ## Branches and pull requests
 
-- Work on a topic branch, not `master`.
+- Work on a topic branch, not `main`.
 - Keep pull requests scoped. The initial import was large; a review covering
   agent, protocol, and server at once is much harder than three smaller ones.
 - If a change touches `internal/server/tui.go`, include the terminal-size
