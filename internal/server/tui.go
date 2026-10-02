@@ -19,6 +19,54 @@ var Version = "dev"
 
 const maxVisibleRecords = 1000
 
+// Responsive layout breakpoints (terminal columns/rows).
+const (
+	breakpointWide   = 140
+	breakpointMedium = 100
+	minTTYWidth      = 40
+	minTTYHeight     = 10
+	sidebarMinWidth  = 30
+	stackedSidebarH  = 10
+)
+
+// layout describes panel geometry for one frame.
+type layout struct {
+	stacked  bool
+	sidebarW int
+	sidebarH int
+	mainW    int
+	mainH    int
+}
+
+func (m *model) computeLayout() layout {
+	w := m.width
+	// content rows available for panels: total - header(1) - gap(1) - gap(1) - status(1)
+	availH := m.height - 4
+	if availH < 3 {
+		availH = 3
+	}
+	if w >= breakpointWide {
+		sw := w / 3
+		if sw < sidebarMinWidth {
+			sw = sidebarMinWidth
+		}
+		return layout{stacked: false, sidebarW: sw, sidebarH: availH, mainW: w - sw - 4, mainH: availH}
+	}
+	if w >= breakpointMedium {
+		sw := 32
+		return layout{stacked: false, sidebarW: sw, sidebarH: availH, mainW: w - sw - 4, mainH: availH}
+	}
+	// Narrow: stack sidebar above logs.
+	sh := stackedSidebarH
+	if availH-3 < sh {
+		sh = availH - 3
+	}
+	if sh < 4 {
+		sh = 4
+	}
+	return layout{stacked: true, sidebarW: w, sidebarH: sh, mainW: w, mainH: availH - sh}
+}
+
 type logFile struct {
 	Date  string
 	App   string
@@ -531,48 +579,40 @@ func (m *model) View() string {
 	if m.width == 0 || m.height == 0 {
 		return "Loading..."
 	}
-
-	sidebarWidth := m.width / 3
-	if sidebarWidth < 30 {
-		sidebarWidth = 30
+	if m.width < minTTYWidth || m.height < minTTYHeight {
+		return fmt.Sprintf("Terminal too small (min %dx%d)\n", minTTYWidth, minTTYHeight)
 	}
-	mainWidth := m.width - sidebarWidth - 4
 
-	// Header bar (full width) - single styled string to avoid JoinHorizontal collapse
-	headerText := fmt.Sprintf(" LOGMON DASHBOARD %*s v%s ", (m.width - len(" LOGMON DASHBOARD v"+Version) - 2), "", Version)
+	lay := m.computeLayout()
+
+	// Header bar (full width) - simple text, padded to terminal width
+	headerText := fmt.Sprintf(" LOGMON DASHBOARD  |  v%s ", Version)
 	header := headerStyle.Width(m.width).Render(headerText)
 
-	// Status bar
-	statusBar := m.renderStatusBar()
+	// Status bar (minimal on narrow terminals)
+	statusBar := m.renderStatusBar(lay.stacked)
 
-	// Panel height = total - header(1) - gap(1) - status(1) - gap(1) = height - 4
-	panelHeight := m.height - 4
-	if panelHeight < 5 {
-		panelHeight = 5
+	sidebar := m.renderSidebar(lay.sidebarW, lay.sidebarH)
+	main := m.renderMain(lay.mainW, lay.mainH)
+
+	var content string
+	if lay.stacked {
+		content = lipgloss.JoinVertical(lipgloss.Left, sidebar, main)
+	} else {
+		content = lipgloss.JoinHorizontal(lipgloss.Top, sidebar, "  ", main)
 	}
 
-	sidebar := m.renderSidebar(sidebarWidth, panelHeight)
-	main := m.renderMain(mainWidth, panelHeight)
-
-	content := lipgloss.JoinHorizontal(lipgloss.Top, sidebar, "  ", main)
-
-	return lipgloss.JoinVertical(lipgloss.Left, header, "", content, "", statusBar)
+	// Explicit newlines: no empty-block edge cases from JoinVertical.
+	return header + "\n\n" + content + "\n\n" + statusBar
 }
 
 func (m *model) renderSidebar(width, height int) string {
-	var b strings.Builder
-
 	style := sidebarStyle
 	if m.focus == focusSidebar {
 		style = focusedSidebarStyle
 	}
 
 	innerWidth := width - 4
-
-	// Agents section
-	agentsTitle := sectionTitleStyle.Render(" Agents ")
-	b.WriteString(agentsTitle)
-	b.WriteString("\n")
 
 	agentIDs := make([]string, 0, len(m.agents))
 	for id := range m.agents {
@@ -582,70 +622,131 @@ func (m *model) renderSidebar(width, height int) string {
 
 	agentCount := len(agentIDs)
 
+	type sidebarRow struct {
+		text     string
+		selected bool
+	}
+
+	// Collect selectable rows (agents first, then tree nodes) so the
+	// cursor index maps 1:1 and the visible window can follow it.
+	agentRows := make([]sidebarRow, 0, agentCount)
+	for i, id := range agentIDs {
+		agent := m.agents[id]
+		state := "●"
+		stateStyle := connectedStyle
+		if !agent.Connected {
+			state = "○"
+			stateStyle = offlineStyle
+		}
+		var line string
+		if m.focus == focusSidebar && i == m.sidebarIndex {
+			line = selectedStyle.Width(innerWidth).Render(fmt.Sprintf("%s %s %-20s", state, agent.ID, safeText(agent.Hostname)))
+		} else {
+			line = fmt.Sprintf("%s %s %s", stateStyle.Render(state), agent.ID, safeText(agent.Hostname))
+			if len(line) > innerWidth {
+				line = line[:innerWidth]
+			}
+		}
+		agentRows = append(agentRows, sidebarRow{text: line, selected: m.focus == focusSidebar && i == m.sidebarIndex})
+	}
+
+	treeRows := make([]sidebarRow, 0, len(m.treeFlattened))
+	for i, node := range m.treeFlattened {
+		unifiedIdx := agentCount + i
+		indent := strings.Repeat("  ", nodeDepth(node))
+		prefix := "  "
+		if len(node.Children) > 0 {
+			if node.Expanded {
+				prefix = "▼ "
+			} else {
+				prefix = "▶ "
+			}
+		}
+		name := node.Name
+		if node.IsFile {
+			name = "● " + name
+		}
+		line := indent + prefix + name
+		if m.focus == focusSidebar && unifiedIdx == m.sidebarIndex {
+			line = selectedStyle.Width(innerWidth).Render(line)
+		} else if len(line) > innerWidth {
+			line = line[:innerWidth]
+		}
+		treeRows = append(treeRows, sidebarRow{text: line, selected: m.focus == focusSidebar && unifiedIdx == m.sidebarIndex})
+	}
+
+	// Window selectable rows around the cursor so short panels scroll
+	// instead of overflowing. Fixed lines: 2 section titles + 1 blank.
+	selectable := append(agentRows, treeRows...)
+	maxRows := height - 2 // lipgloss borders
+	rowBudget := maxRows - 3
+	if rowBudget < 1 {
+		rowBudget = 1
+	}
+	start := 0
+	if len(selectable) > rowBudget {
+		cursor := m.sidebarIndex
+		if cursor < 0 {
+			cursor = 0
+		}
+		if cursor >= len(selectable) {
+			cursor = len(selectable) - 1
+		}
+		start = cursor - rowBudget/2
+		if start < 0 {
+			start = 0
+		}
+		if start+rowBudget > len(selectable) {
+			start = len(selectable) - rowBudget
+		}
+	}
+	end := start + rowBudget
+	if end > len(selectable) {
+		end = len(selectable)
+	}
+
+	// Split visible rows back into agent/tree sections for titles.
+	var visibleAgents, visibleTree []sidebarRow
+	if start < agentCount {
+		agentEnd := end
+		if agentEnd > agentCount {
+			agentEnd = agentCount
+		}
+		visibleAgents = selectable[start:agentEnd]
+	}
+	treeStart := start - agentCount
+	if treeStart < 0 {
+		treeStart = 0
+	}
+	treeEnd := end - agentCount
+	if treeEnd > len(treeRows) {
+		treeEnd = len(treeRows)
+	}
+	if treeEnd > treeStart {
+		visibleTree = treeRows[treeStart:treeEnd]
+	}
+
+	var b strings.Builder
+	b.WriteString(sectionTitleStyle.Render(" Agents "))
+	b.WriteString("\n")
 	if agentCount == 0 {
 		b.WriteString("  (none — start an agent)")
 		b.WriteString("\n")
 	} else {
-		for i, id := range agentIDs {
-			agent := m.agents[id]
-			state := "●"
-			stateStyle := connectedStyle
-			if !agent.Connected {
-				state = "○"
-				stateStyle = offlineStyle
-			}
-
-			line := fmt.Sprintf("%s %s %-20s", state, agent.ID, safeText(agent.Hostname))
-			if m.focus == focusSidebar && i == m.sidebarIndex {
-				line = selectedStyle.Width(innerWidth).Render(line)
-			} else {
-				line = fmt.Sprintf("%s %s %s", stateStyle.Render(state), agent.ID, safeText(agent.Hostname))
-				if len(line) > innerWidth {
-					line = line[:innerWidth]
-				}
-			}
-			b.WriteString(line)
+		for _, row := range visibleAgents {
+			b.WriteString(row.text)
 			b.WriteString("\n")
 		}
 	}
-
 	b.WriteString("\n")
-
-	// Files section
-	filesTitle := sectionTitleStyle.Render(" Files ")
-	b.WriteString(filesTitle)
+	b.WriteString(sectionTitleStyle.Render(" Files "))
 	b.WriteString("\n")
-
 	if len(m.treeFlattened) == 0 {
 		b.WriteString("  (no logs)")
 		b.WriteString("\n")
 	} else {
-		for i, node := range m.treeFlattened {
-			unifiedIdx := agentCount + i
-			indent := strings.Repeat("  ", nodeDepth(node))
-			prefix := "  "
-			if len(node.Children) > 0 {
-				if node.Expanded {
-					prefix = "▼ "
-				} else {
-					prefix = "▶ "
-				}
-			}
-
-			name := node.Name
-			if node.IsFile {
-				name = "● " + name
-			}
-
-			line := indent + prefix + name
-			if m.focus == focusSidebar && unifiedIdx == m.sidebarIndex {
-				line = selectedStyle.Width(innerWidth).Render(line)
-			} else {
-				if len(line) > innerWidth {
-					line = line[:innerWidth]
-				}
-			}
-			b.WriteString(line)
+		for _, row := range visibleTree {
+			b.WriteString(row.text)
 			b.WriteString("\n")
 		}
 	}
@@ -719,15 +820,18 @@ func (m *model) renderMain(width, height int) string {
 	return style.Width(width).Height(height).Render(b.String())
 }
 
-func (m *model) renderStatusBar() string {
+func (m *model) renderStatusBar(minimal bool) string {
 	connected := connectedCount(m.agents)
 	focusStr := map[focusPane]string{focusSidebar: "Sidebar", focusMain: "Logs"}[m.focus]
 
-	// Short hints on narrow terminals
+	// Short hints on narrow terminals, minimal when stacked.
 	var hints string
-	if m.width < 100 {
+	switch {
+	case minimal:
+		hints = "Tab: switch  q: quit  ?: help"
+	case m.width < 100:
 		hints = "Tab: switch  ↑↓/jk: nav  ←→: expand  Enter: open  q: quit  r: refresh"
-	} else {
+	default:
 		hints = "Tab: switch  ↑↓/jk: nav  ←→/hl: expand  Enter: open  q: quit  r: refresh  /: filter"
 	}
 
