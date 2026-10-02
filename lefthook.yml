@@ -1,5 +1,5 @@
 pre-commit:
-  parallel: true
+  parallel: false
   commands:
     fmt:
       run: make fmt
@@ -8,3 +8,5 @@ pre-commit:
       run: make vet
     lint:
       run: make lint
+    test:
+      run: make test

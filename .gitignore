@@ -1,2 +1,9 @@
 **/*.log
 **/agent.yaml
+**/server.yaml
+bin/
+data/
+tmp
+/server
+AGENTS.md
+/agent
