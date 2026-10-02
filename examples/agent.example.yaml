@@ -1,0 +1,52 @@
+# Logmon agent configuration.
+#
+# Copy to agent.yaml and replace every <...> placeholder:
+#
+#   cp examples/agent.example.yaml agent.yaml
+#
+# This file holds a secret. Keep it mode 0600 and owned by the agent user.
+# The alternative is to leave token empty and export LOGMON_AGENT_TOKEN
+# instead; the environment variable is read only when YAML omits token.
+#
+# Unknown keys are rejected at startup.
+
+# Must match an agent ID in the server allowlist.
+id: prod-1
+
+# Optional host label stored with every record. Defaults to os.Hostname().
+# hostname: api-01
+
+# Server TCP address.
+server: 127.0.0.1:9000
+
+# The original token, not its SHA-256 digest. The server compares the digest.
+# token: "<original-random-token>"
+
+# Reconnect and restart failed sources instead of exiting.
+retry: true
+retry_delay: 2s
+
+# Required. One or more sources. Every source needs app and category.
+# Agent IDs, apps, and categories accept letters, numbers, '.', '_', and '-'.
+sources:
+  - type: file
+    # Relative paths resolve from this config file's directory.
+    path: ./app.log
+    app: test
+    category: access
+    # false seeks to the current end of the file, so only new lines are sent.
+    from_beginning: true
+
+  # - type: journald
+  #   unit: billing.service
+  #   app: billing
+  #   category: service
+  #   # false starts journalctl with --lines=0.
+  #   from_beginning: false
+
+  # - type: docker
+  #   container: billing-api
+  #   app: billing
+  #   category: container
+  #   # false starts docker logs with --tail=0.
+  #   from_beginning: false

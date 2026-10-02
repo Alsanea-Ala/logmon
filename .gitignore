@@ -1,6 +1,7 @@
 **/*.log
 **/agent.yaml
 **/server.yaml
+!examples/*.yaml
 bin/
 data/
 tmp
