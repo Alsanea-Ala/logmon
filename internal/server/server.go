@@ -216,22 +216,28 @@ func (run *runtime) serve(ctx context.Context, listener net.Listener) error {
 func (run *runtime) handle(conn net.Conn) {
 	defer conn.Close()
 	if tcp, ok := conn.(*net.TCPConn); ok {
-		tcp.SetKeepAlive(true)
-		tcp.SetKeepAlivePeriod(time.Minute)
+		// Keepalive tuning is best effort. A failure here degrades to the
+		// OS default rather than breaking the connection.
+		_ = tcp.SetKeepAlive(true)
+		_ = tcp.SetKeepAlivePeriod(time.Minute)
 	}
 	encoder := json.NewEncoder(conn)
 	scanner := protocol.Scanner(conn)
-	conn.SetDeadline(time.Now().Add(handshakeTimeout))
+	// If arming a deadline fails, the connection is already unusable and the
+	// decode below fails on its own rather than blocking forever.
+	_ = conn.SetDeadline(time.Now().Add(handshakeTimeout))
 
 	var hello protocol.Hello
 	if err := protocol.Decode(scanner, &hello); err != nil || !run.authenticate(hello) {
-		encoder.Encode(protocol.Ack{OK: false, Error: "authentication failed"})
+		// A failed rejection ACK is not actionable: this handler is already
+		// returning an error, and the agent's own timeout covers the read.
+		_ = encoder.Encode(protocol.Ack{OK: false, Error: "authentication failed"})
 		return
 	}
 	if err := encoder.Encode(protocol.Ack{OK: true}); err != nil {
 		return
 	}
-	conn.SetDeadline(time.Time{})
+	_ = conn.SetDeadline(time.Time{})
 	run.register(hello, conn)
 	defer run.disconnect(hello.AgentID, conn)
 
@@ -240,13 +246,15 @@ func (run *runtime) handle(conn net.Conn) {
 		declaredApps[app] = true
 	}
 	for {
-		conn.SetReadDeadline(time.Now().Add(idleTimeout))
+		_ = conn.SetReadDeadline(time.Now().Add(idleTimeout))
 		var record protocol.Record
 		if err := protocol.Decode(scanner, &record); err != nil {
 			return
 		}
 		if err := validateRecord(record, declaredApps); err != nil {
-			encoder.Encode(protocol.Ack{OK: false, Error: err.Error()})
+			// Same as the rejection ACK above: the handler is already
+			// returning, and nothing downstream reads the ACK.
+			_ = encoder.Encode(protocol.Ack{OK: false, Error: err.Error()})
 			return
 		}
 		stored := protocol.StoredRecord{
@@ -262,11 +270,11 @@ func (run *runtime) handle(conn net.Conn) {
 		if err := run.append(stored); err != nil {
 			return
 		}
-		conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		if err := encoder.Encode(protocol.Ack{OK: true}); err != nil {
 			return
 		}
-		conn.SetWriteDeadline(time.Time{})
+		_ = conn.SetWriteDeadline(time.Time{})
 		run.seen(hello.AgentID, stored.ReceivedAt)
 		run.notify(recordMsg(stored))
 	}
