@@ -1,0 +1,23 @@
+# golangci-lint configuration.
+#
+# Only one preset is enabled, and only to cover a category rather than to
+# silence findings. Everything else stays at the default linter set, so a
+# genuinely missed error — an unchecked json.Unmarshal, an ignored os.Open,
+# a dropped json.Encoder.Encode — still fails the build.
+#
+# std-error-handling covers the calls whose error return carries no action:
+#   * any .Close()      cleanup on a path that is already unwinding
+#   * any print/f/ln    startup banners and diagnostics
+#   * Flush, os.Remove, os.Setenv
+#
+# It deliberately does not cover SetDeadline or json Encoder.Encode, which
+# is why those are written as `_ =` with a comment at each site rather than
+# excluded here.
+#
+# version: "2" is required by golangci-lint v2. Omitting it fails to load.
+version: "2"
+
+linters:
+  exclusions:
+    presets:
+      - std-error-handling
