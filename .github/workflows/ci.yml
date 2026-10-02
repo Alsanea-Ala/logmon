@@ -20,9 +20,9 @@ jobs:
     name: test (fmt, vet, lint, unit-test, build-test)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
@@ -60,17 +60,17 @@ jobs:
     name: race
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
 
       - run: go test -race ./...
 
-  # Compile check only. GoReleaser produces the real binaries in
-  # release.yml, so nothing is handed to a publish step here.
+  # Compile check only. GoReleaser produces the real binaries in publish.yml,
+  # so nothing is handed to a publish step here.
   build:
     name: build (${{ matrix.goos }}/${{ matrix.goarch }})
     needs: [test, race]
@@ -84,9 +84,9 @@ jobs:
           - goos: linux
             goarch: arm64
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
