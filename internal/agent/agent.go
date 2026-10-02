@@ -309,8 +309,12 @@ func send(ctx context.Context, cfg Config, hostname string, records <-chan proto
 		}
 
 		active := connection
-		active.SetDeadline(time.Now().Add(30 * time.Second))
-		stopCancel := context.AfterFunc(ctx, func() { active.SetDeadline(time.Now()) })
+		// Arming deadlines: if setting one fails the connection is already
+		// unusable, and the read or write below fails on its own rather than
+		// blocking forever. The force-unblock and clear calls likewise only
+		// matter on a connection that is still alive.
+		_ = active.SetDeadline(time.Now().Add(30 * time.Second))
+		stopCancel := context.AfterFunc(ctx, func() { _ = active.SetDeadline(time.Now()) })
 		if err := active.encoder.Encode(pending); err == nil {
 			var ack protocol.Ack
 			err = protocol.Decode(active.scanner, &ack)
@@ -321,7 +325,7 @@ func send(ctx context.Context, cfg Config, hostname string, records <-chan proto
 			if err == nil {
 				pending = nil
 				stopCancel()
-				active.SetDeadline(time.Time{})
+				_ = active.SetDeadline(time.Time{})
 				continue
 			}
 		}
@@ -347,7 +351,7 @@ func connect(ctx context.Context, cfg Config, hostname string) (*serverConnectio
 		return nil, err
 	}
 	connection := &serverConnection{Conn: conn, encoder: json.NewEncoder(conn), scanner: protocol.Scanner(conn)}
-	connection.SetDeadline(time.Now().Add(5 * time.Second))
+	_ = connection.SetDeadline(time.Now().Add(5 * time.Second))
 
 	if err := connection.encoder.Encode(protocol.Hello{
 		Version:  protocol.Version,
@@ -368,7 +372,7 @@ func connect(ctx context.Context, cfg Config, hostname string) (*serverConnectio
 		connection.Close()
 		return nil, fmt.Errorf("%w: %s", errRejected, ack.Error)
 	}
-	connection.SetDeadline(time.Time{})
+	_ = connection.SetDeadline(time.Time{})
 	return connection, nil
 }
 
