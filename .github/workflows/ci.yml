@@ -37,6 +37,16 @@ jobs:
           git diff --exit-code
 
       - run: make vet
+
+      # ubuntu-latest ships Go but not golangci-lint, and repository setup
+      # no longer installs tools, so `make lint` alone died on Error 127.
+      # install-only keeps `make lint` as the single lint entry point,
+      # shared with lefthook.yml, instead of duplicating the command here.
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12
+          install-only: true
+
       - run: make lint
       - run: make test
       - run: make build
