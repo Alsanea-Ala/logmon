@@ -153,19 +153,23 @@ var (
 
 	sidebarStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("240"))
+			BorderForeground(lipgloss.Color("240")).
+			Padding(0, 1)
 
 	mainStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("240"))
+			BorderForeground(lipgloss.Color("240")).
+			Padding(0, 1)
 
 	focusedSidebarStyle = lipgloss.NewStyle().
 				Border(lipgloss.RoundedBorder()).
-				BorderForeground(lipgloss.Color("39"))
+				BorderForeground(lipgloss.Color("39")).
+				Padding(0, 1)
 
 	focusedMainStyle = lipgloss.NewStyle().
 				Border(lipgloss.RoundedBorder()).
-				BorderForeground(lipgloss.Color("39"))
+				BorderForeground(lipgloss.Color("39")).
+				Padding(0, 1)
 
 	sectionTitleStyle = lipgloss.NewStyle().
 				Bold(true).
@@ -197,6 +201,9 @@ var (
 
 	timeStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("244"))
+
+	dividerStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("240"))
 
 	headerStyle = lipgloss.NewStyle().
 			Bold(true).
@@ -576,18 +583,23 @@ func (m *model) flattenNode(node *fileNode) {
 }
 
 func (m *model) View() string {
-	if m.width == 0 || m.height == 0 {
-		return "Loading..."
+	w, h := m.width, m.height
+	if w < 1 {
+		w = 80
+	}
+	if h < 1 {
+		h = 24
 	}
 	if m.width < minTTYWidth || m.height < minTTYHeight {
-		return fmt.Sprintf("Terminal too small (min %dx%d)\n", minTTYWidth, minTTYHeight)
+		return fmt.Sprintf(" LOGMON DASHBOARD  |  v%s \n\nTerminal too small (min %dx%d)\n",
+			Version, minTTYWidth, minTTYHeight)
 	}
 
 	lay := m.computeLayout()
 
-	// Header bar (full width) - simple text, padded to terminal width
+	// Flat header bar: no forced width, so no trailing background padding.
 	headerText := fmt.Sprintf(" LOGMON DASHBOARD  |  v%s ", Version)
-	header := headerStyle.Width(m.width).Render(headerText)
+	header := headerStyle.Render(headerText)
 
 	// Status bar (minimal on narrow terminals)
 	statusBar := m.renderStatusBar(lay.stacked)
@@ -602,8 +614,8 @@ func (m *model) View() string {
 		content = lipgloss.JoinHorizontal(lipgloss.Top, sidebar, "  ", main)
 	}
 
-	// Explicit newlines: no empty-block edge cases from JoinVertical.
-	return header + "\n\n" + content + "\n\n" + statusBar
+	// Tight assembly: header sits flush above the panels.
+	return header + "\n" + content + "\n" + statusBar
 }
 
 func (m *model) renderSidebar(width, height int) string {
@@ -638,14 +650,13 @@ func (m *model) renderSidebar(width, height int) string {
 			state = "○"
 			stateStyle = offlineStyle
 		}
+		plain := fmt.Sprintf("%s %s %s", state, agent.ID, safeText(agent.Hostname))
 		var line string
 		if m.focus == focusSidebar && i == m.sidebarIndex {
-			line = selectedStyle.Width(innerWidth).Render(fmt.Sprintf("%s %s %-20s", state, agent.ID, safeText(agent.Hostname)))
+			line = selectedStyle.Width(innerWidth).Render(truncateText(plain, innerWidth))
 		} else {
-			line = fmt.Sprintf("%s %s %s", stateStyle.Render(state), agent.ID, safeText(agent.Hostname))
-			if len(line) > innerWidth {
-				line = line[:innerWidth]
-			}
+			line = stateStyle.Render(state) + " " + truncateText(
+				fmt.Sprintf("%s %s", agent.ID, safeText(agent.Hostname)), innerWidth-2)
 		}
 		agentRows = append(agentRows, sidebarRow{text: line, selected: m.focus == focusSidebar && i == m.sidebarIndex})
 	}
@@ -668,18 +679,18 @@ func (m *model) renderSidebar(width, height int) string {
 		}
 		line := indent + prefix + name
 		if m.focus == focusSidebar && unifiedIdx == m.sidebarIndex {
-			line = selectedStyle.Width(innerWidth).Render(line)
-		} else if len(line) > innerWidth {
-			line = line[:innerWidth]
+			line = selectedStyle.Width(innerWidth).Render(truncateText(line, innerWidth))
+		} else {
+			line = truncateText(line, innerWidth)
 		}
 		treeRows = append(treeRows, sidebarRow{text: line, selected: m.focus == focusSidebar && unifiedIdx == m.sidebarIndex})
 	}
 
 	// Window selectable rows around the cursor so short panels scroll
-	// instead of overflowing. Fixed lines: 2 section titles + 1 blank.
+	// instead of overflowing. Fixed lines: 2 section titles.
 	selectable := append(agentRows, treeRows...)
 	maxRows := height - 2 // lipgloss borders
-	rowBudget := maxRows - 3
+	rowBudget := maxRows - 2
 	if rowBudget < 1 {
 		rowBudget = 1
 	}
@@ -738,7 +749,6 @@ func (m *model) renderSidebar(width, height int) string {
 			b.WriteString("\n")
 		}
 	}
-	b.WriteString("\n")
 	b.WriteString(sectionTitleStyle.Render(" Files "))
 	b.WriteString("\n")
 	if len(m.treeFlattened) == 0 {
@@ -756,6 +766,25 @@ func (m *model) renderSidebar(width, height int) string {
 
 func nodeDepth(node *fileNode) int {
 	return node.Depth
+}
+
+// truncateText shortens s to width display cells, marking the cut with an
+// ellipsis instead of slicing mid-glyph.
+func truncateText(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if lipgloss.Width(s) <= width {
+		return s
+	}
+	if width == 1 {
+		return "…"
+	}
+	runes := []rune(s)
+	for len(runes) > 0 && lipgloss.Width(string(runes))+1 > width {
+		runes = runes[:len(runes)-1]
+	}
+	return string(runes) + "…"
 }
 
 func (m *model) renderMain(width, height int) string {
@@ -779,7 +808,7 @@ func (m *model) renderMain(width, height int) string {
 			b.WriteString(categoryStyle.Render(" Category: " + cat))
 			b.WriteString("\n")
 		}
-		b.WriteString(strings.Repeat("─", innerWidth))
+		b.WriteString(dividerStyle.Render(strings.Repeat("─", innerWidth)))
 		b.WriteString("\n")
 	}
 
@@ -788,7 +817,7 @@ func (m *model) renderMain(width, height int) string {
 		b.WriteString("  (no logs)")
 		b.WriteString("\n")
 	} else {
-		available := max(1, height-8)
+		available := max(1, height-5)
 		start := max(0, m.lineIndex-available+1)
 		end := min(len(records), start+available)
 
@@ -798,22 +827,22 @@ func (m *model) renderMain(width, height int) string {
 				marker = "►"
 			}
 			rec := records[i]
-			timeStr := timeStyle.Render(rec.ReceivedAt.Format("15:04:05"))
-			catStr := categoryStyle.Render(fmt.Sprintf("%-12s", safeText(rec.Category)))
-			line := fmt.Sprintf("%s %s %s %s", marker, timeStr, catStr, safeText(rec.Line))
+			plain := fmt.Sprintf("%s %s %-12s %s", marker, rec.ReceivedAt.Format("15:04:05"),
+				safeText(rec.Category), safeText(rec.Line))
 
 			if i == m.lineIndex {
-				line = selectedStyle.Render(line)
-			} else if len(line) > innerWidth {
-				line = line[:innerWidth]
+				b.WriteString(selectedStyle.Width(innerWidth).Render(truncateText(plain, innerWidth)))
+			} else {
+				timeStr := timeStyle.Render(rec.ReceivedAt.Format("15:04:05"))
+				catStr := categoryStyle.Render(fmt.Sprintf("%-12s", safeText(rec.Category)))
+				b.WriteString(fmt.Sprintf("%s %s %s %s", marker, timeStr, catStr,
+					truncateText(safeText(rec.Line), max(1, innerWidth-24))))
 			}
-			b.WriteString(line)
 			b.WriteString("\n")
 		}
 	}
 
 	if m.err != nil {
-		b.WriteString("\n")
 		b.WriteString(errorStyle.Render("Error: " + m.err.Error()))
 	}
 
