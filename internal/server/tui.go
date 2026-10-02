@@ -418,12 +418,11 @@ func (m *model) handleFilterInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) applyFilter() {
+	// Filtering records and sidebar entries is not implemented; only the
+	// selection reset is live. The focus branches that used to sit here were
+	// empty, so staticcheck flagged them. Do not read them as a partial
+	// implementation.
 	m.lineIndex = 0
-	if m.focus == focusMain {
-		// filter records
-	} else {
-		// filter sidebar
-	}
 }
 
 func (m *model) moveUp() (tea.Model, tea.Cmd) {
@@ -616,10 +615,7 @@ func (m *model) flattenNode(node *fileNode) {
 }
 
 func (m *model) View() string {
-	w, h := m.width, m.height
-	if w < 1 {
-		w = 80
-	}
+	h := m.height
 	if h < 1 {
 		h = 24
 	}
