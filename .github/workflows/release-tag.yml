@@ -35,12 +35,10 @@ jobs:
           # commit that was actually tested.
           ref: ${{ github.event.workflow_run.head_sha }}
 
-      # install-only so the version decision stays in one readable shell
-      # script below rather than being split across action outputs.
-      - uses: orhun/git-cliff-action@v4
-        with:
-          install-only: true
-          config: cliff.toml
+      # Deliberately after the bump step, not before it: the action runs
+      # git-cliff itself (there is no install-only mode on v4 -- the valid
+      # inputs are version, config, args and github_token), so it needs the
+      # version that step computes.
 
       - id: bump
         name: classify commits and compute the next version
@@ -147,8 +145,21 @@ jobs:
           echo "bump: $BUMP -> $VERSION"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
+      # Rewrites CHANGELOG.md in full from git history, so the file always
+      # matches the commits rather than accumulating edits.
+      #
+      # OUTPUT is the action's run.sh hook; its default is
+      # git-cliff/CHANGELOG.md, which would leave the real file untouched.
       - name: update CHANGELOG.md
-        run: git cliff --unreleased --tag "${{ steps.bump.outputs.version }}" --output CHANGELOG.md
+        uses: orhun/git-cliff-action@v4
+        env:
+          OUTPUT: CHANGELOG.md
+        with:
+          config: cliff.toml
+          # Pinned rather than left to the action's default, so a bump in
+          # upstream does not silently change what renders this file.
+          version: v2.14.2
+          args: --unreleased --tag ${{ steps.bump.outputs.version }} -v
 
       - name: commit, tag, push, dispatch
         env:
