@@ -17,6 +17,15 @@ import (
 // Version set at build time via -ldflags="-X github.com/Alsanea-Ala/logmon/internal/server.Version=..."
 var Version = "dev"
 
+// Panel chrome. lipgloss Width(n) includes padding and only adds the border
+// on top (wrapAt = width - padding), so only the border is subtracted here.
+// Panel padding is Padding(0, 1), so the text column is width - 4.
+const (
+	chromeWidth  = 2 // border only; padding is already inside Width(n)
+	chromeHeight = 2 // border only; panels pad vertically by 0
+	textWidth    = 4 // border (2) + horizontal padding (2)
+)
+
 const maxVisibleRecords = 1000
 
 // Responsive layout breakpoints (terminal columns/rows).
@@ -27,6 +36,12 @@ const (
 	minTTYHeight     = 10
 	sidebarMinWidth  = 30
 	stackedSidebarH  = 10
+	sidebarMinHeight = 4
+	mainMinWidth     = 20
+	separatorWidth   = 2
+
+	// statusBarStyle pads one column each side.
+	statusBarPadding = 2
 )
 
 // layout describes panel geometry for one frame.
@@ -39,30 +54,56 @@ type layout struct {
 }
 
 func (m *model) computeLayout() layout {
-	w := m.width
-	// content rows available for panels: total - header(1) - gap(1) - gap(1) - status(1)
-	availH := m.height - 4
+	w, h := m.width, m.height
+	if w < minTTYWidth {
+		w = minTTYWidth
+	}
+	if h < minTTYHeight {
+		h = minTTYHeight
+	}
+
+	// Rows available to the panels: total - header(1) - status bar(1).
+	availH := h - 2
 	if availH < 3 {
 		availH = 3
 	}
-	if w >= breakpointWide {
-		sw := w / 3
+
+	// Side-by-side: sidebar + 2 column separator + main fills the width.
+	side := func(sw int) layout {
 		if sw < sidebarMinWidth {
 			sw = sidebarMinWidth
 		}
-		return layout{stacked: false, sidebarW: sw, sidebarH: availH, mainW: w - sw - 4, mainH: availH}
+		if maxSide := w - separatorWidth - mainMinWidth; sw > maxSide {
+			sw = maxSide
+		}
+		if sw < 1 {
+			sw = 1
+		}
+		return layout{
+			stacked:  false,
+			sidebarW: sw,
+			sidebarH: availH,
+			mainW:    w - sw - separatorWidth,
+			mainH:    availH,
+		}
 	}
-	if w >= breakpointMedium {
-		sw := 32
-		return layout{stacked: false, sidebarW: sw, sidebarH: availH, mainW: w - sw - 4, mainH: availH}
+
+	switch {
+	case w >= breakpointWide:
+		return side(w / 3)
+	case w >= breakpointMedium:
+		return side(32)
 	}
-	// Narrow: stack sidebar above logs.
-	sh := stackedSidebarH
-	if availH-3 < sh {
-		sh = availH - 3
+
+	// Narrow: stack the sidebar above the logs, giving each a share of the
+	// available height so neither panel is squeezed out on short terminals.
+	sh := min(stackedSidebarH, availH/2)
+	sh = max(sh, sidebarMinHeight)
+	if sh > availH-sidebarMinHeight {
+		sh = availH - sidebarMinHeight
 	}
-	if sh < 4 {
-		sh = 4
+	if sh < 1 {
+		sh = 1
 	}
 	return layout{stacked: true, sidebarW: w, sidebarH: sh, mainW: w, mainH: availH - sh}
 }
@@ -148,9 +189,6 @@ func newModel(dataDir string) *model {
 
 // Styles
 var (
-	baseStyle = lipgloss.NewStyle().
-			Padding(0, 1)
-
 	sidebarStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("240")).
@@ -188,13 +226,14 @@ var (
 	errorStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("196"))
 
+	// filterStyle marks the active filter. No background fill: the chrome
+	// bars stay transparent so only the text colour carries meaning.
 	filterStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("226")).
-			Background(lipgloss.Color("236"))
+			Bold(true).
+			Foreground(lipgloss.Color("15"))
 
 	statusBarStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("252")).
-			Background(lipgloss.Color("236"))
+			Foreground(lipgloss.Color("15"))
 
 	categoryStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("205"))
@@ -207,14 +246,8 @@ var (
 
 	headerStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("230")).
-			Background(lipgloss.Color("236")).
+			Foreground(lipgloss.Color("15")).
 			Padding(0, 1)
-
-	headerVersionStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("244")).
-				Background(lipgloss.Color("236")).
-				Padding(0, 1)
 )
 
 func (m *model) Init() tea.Cmd {
@@ -615,7 +648,41 @@ func (m *model) View() string {
 	}
 
 	// Tight assembly: header sits flush above the panels.
-	return header + "\n" + content + "\n" + statusBar
+	frame := header + "\n" + content + "\n" + statusBar
+
+	// Never emit more rows than the terminal has: an overflowing frame
+	// scrolls the header off the top.
+	return clampHeight(frame, h)
+}
+
+// clampHeight clips s to at most rows lines while preserving the first row
+// (the header) and the last row (the status bar). Clipping the middle keeps
+// both pieces of chrome on screen even if the panels overflow.
+func clampHeight(s string, rows int) string {
+	if rows <= 0 {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	if len(lines) <= rows {
+		return s
+	}
+	if rows == 1 {
+		return lines[0]
+	}
+	// Keep the header and the status bar; drop rows from the middle.
+	keep := rows - 2 // one row for the header, one for the status bar
+	if keep < 0 {
+		keep = 0
+	}
+	middle := lines[1 : len(lines)-1]
+	if len(middle) > keep {
+		middle = middle[len(middle)-keep:]
+	}
+	out := make([]string, 0, rows)
+	out = append(out, lines[0])
+	out = append(out, middle...)
+	out = append(out, lines[len(lines)-1])
+	return strings.Join(out, "\n")
 }
 
 func (m *model) renderSidebar(width, height int) string {
@@ -624,7 +691,10 @@ func (m *model) renderSidebar(width, height int) string {
 		style = focusedSidebarStyle
 	}
 
-	innerWidth := width - 4
+	innerWidth := width - textWidth
+	if innerWidth < 1 {
+		innerWidth = 1
+	}
 
 	agentIDs := make([]string, 0, len(m.agents))
 	for id := range m.agents {
@@ -687,10 +757,9 @@ func (m *model) renderSidebar(width, height int) string {
 	}
 
 	// Window selectable rows around the cursor so short panels scroll
-	// instead of overflowing. Fixed lines: 2 section titles.
+	// instead of overflowing. Both section titles are always drawn.
 	selectable := append(agentRows, treeRows...)
-	maxRows := height - 2 // lipgloss borders
-	rowBudget := maxRows - 2
+	rowBudget := height - chromeHeight - 2 // border + Agents/Files titles
 	if rowBudget < 1 {
 		rowBudget = 1
 	}
@@ -737,31 +806,27 @@ func (m *model) renderSidebar(width, height int) string {
 		visibleTree = treeRows[treeStart:treeEnd]
 	}
 
-	var b strings.Builder
-	b.WriteString(sectionTitleStyle.Render(" Agents "))
-	b.WriteString("\n")
+	// Lines are joined without a trailing newline: a trailing "\n" would add
+	// a phantom row that Height() cannot shrink, pushing the status bar off.
+	lines := make([]string, 0, rowBudget+2)
+	lines = append(lines, sectionTitleStyle.Render(" Agents "))
 	if agentCount == 0 {
-		b.WriteString("  (none — start an agent)")
-		b.WriteString("\n")
+		lines = append(lines, "  (none — start an agent)")
 	} else {
 		for _, row := range visibleAgents {
-			b.WriteString(row.text)
-			b.WriteString("\n")
+			lines = append(lines, row.text)
 		}
 	}
-	b.WriteString(sectionTitleStyle.Render(" Files "))
-	b.WriteString("\n")
+	lines = append(lines, sectionTitleStyle.Render(" Files "))
 	if len(m.treeFlattened) == 0 {
-		b.WriteString("  (no logs)")
-		b.WriteString("\n")
+		lines = append(lines, "  (no logs)")
 	} else {
 		for _, row := range visibleTree {
-			b.WriteString(row.text)
-			b.WriteString("\n")
+			lines = append(lines, row.text)
 		}
 	}
 
-	return style.Width(width).Height(height).Render(b.String())
+	return style.Width(width - chromeWidth).Height(height - chromeHeight).Render(strings.Join(lines, "\n"))
 }
 
 func nodeDepth(node *fileNode) int {
@@ -788,36 +853,44 @@ func truncateText(s string, width int) string {
 }
 
 func (m *model) renderMain(width, height int) string {
-	var b strings.Builder
-
 	style := mainStyle
 	if m.focus == focusMain {
 		style = focusedMainStyle
 	}
 
-	innerWidth := width - 4
+	innerWidth := width - textWidth
+	if innerWidth < 1 {
+		innerWidth = 1
+	}
 
-	// Header
+	// Header block: path, optional category, divider. Rows are accumulated in
+	// a slice and joined without a trailing newline, which would otherwise
+	// add a phantom row that Height() cannot shrink.
+	chrome := 0
+	rows := make([]string, 0, height)
 	if len(m.files) > 0 {
 		file := m.files[m.fileIndex]
-		header := fmt.Sprintf(" %s / %s / %s ", file.Date, file.App, file.Agent)
-		b.WriteString(sectionTitleStyle.Render(header))
-		b.WriteString("\n")
-		cat := m.categories[m.categoryIndex]
-		if cat != "all" {
-			b.WriteString(categoryStyle.Render(" Category: " + cat))
-			b.WriteString("\n")
+		rows = append(rows, truncateText(
+			sectionTitleStyle.Render(fmt.Sprintf(" %s / %s / %s ", file.Date, file.App, file.Agent)), innerWidth))
+		chrome++
+		if cat := m.categories[m.categoryIndex]; cat != "all" {
+			rows = append(rows, categoryStyle.Render(" Category: "+cat))
+			chrome++
 		}
-		b.WriteString(dividerStyle.Render(strings.Repeat("─", innerWidth)))
-		b.WriteString("\n")
+		rows = append(rows, dividerStyle.Render(strings.Repeat("─", innerWidth)))
+		chrome++
 	}
+
+	// Rows left for records once the border and header block are accounted for.
+	textRows := height - chromeHeight - chrome
 
 	records := m.filtered()
 	if len(records) == 0 {
-		b.WriteString("  (no logs)")
-		b.WriteString("\n")
+		if textRows > 0 {
+			rows = append(rows, "  (no logs)")
+		}
 	} else {
-		available := max(1, height-5)
+		available := min(max(1, textRows), len(records))
 		start := max(0, m.lineIndex-available+1)
 		end := min(len(records), start+available)
 
@@ -827,51 +900,78 @@ func (m *model) renderMain(width, height int) string {
 				marker = "►"
 			}
 			rec := records[i]
-			plain := fmt.Sprintf("%s %s %-12s %s", marker, rec.ReceivedAt.Format("15:04:05"),
-				safeText(rec.Category), safeText(rec.Line))
+			stamp := rec.ReceivedAt.Format("15:04:05")
+			category := safeText(rec.Category)
+			// Fixed gutter (marker + time + padded category) keeps messages
+			// starting at the same column.
+			gutter := fmt.Sprintf("%s %s %-12s ", marker, stamp, category)
+			body := truncateText(safeText(rec.Line), max(1, innerWidth-lipgloss.Width(gutter)))
 
 			if i == m.lineIndex {
-				b.WriteString(selectedStyle.Width(innerWidth).Render(truncateText(plain, innerWidth)))
+				rows = append(rows, selectedStyle.Width(innerWidth).Render(gutter+body))
 			} else {
-				timeStr := timeStyle.Render(rec.ReceivedAt.Format("15:04:05"))
-				catStr := categoryStyle.Render(fmt.Sprintf("%-12s", safeText(rec.Category)))
-				b.WriteString(fmt.Sprintf("%s %s %s %s", marker, timeStr, catStr,
-					truncateText(safeText(rec.Line), max(1, innerWidth-24))))
+				rows = append(rows, marker+
+					timeStyle.Render(stamp)+
+					categoryStyle.Render(fmt.Sprintf(" %-12s", category))+
+					body)
 			}
-			b.WriteString("\n")
 		}
 	}
 
 	if m.err != nil {
-		b.WriteString(errorStyle.Render("Error: " + m.err.Error()))
+		rows = append(rows, errorStyle.Render("Error: "+m.err.Error()))
 	}
 
-	return style.Width(width).Height(height).Render(b.String())
+	return style.Width(width - chromeWidth).Height(height - chromeHeight).Render(strings.Join(rows, "\n"))
 }
 
 func (m *model) renderStatusBar(minimal bool) string {
 	connected := connectedCount(m.agents)
 	focusStr := map[focusPane]string{focusSidebar: "Sidebar", focusMain: "Logs"}[m.focus]
 
-	// Short hints on narrow terminals, minimal when stacked.
-	var hints string
+	// Short hints on narrow terminals, minimal when stacked. Hints are
+	// dropped in order until the bar fits so it never wraps to a second
+	// line (a wrapped status bar makes the frame taller than the terminal
+	// and scrolls the header out of view).
+	var hints []string
 	switch {
 	case minimal:
-		hints = "Tab: switch  q: quit  ?: help"
+		hints = []string{"Tab: switch", "q: quit", "?: help"}
 	case m.width < 100:
-		hints = "Tab: switch  ↑↓/jk: nav  ←→: expand  Enter: open  q: quit  r: refresh"
+		hints = []string{"Tab: switch", "↑↓/jk: nav", "←→: expand", "Enter: open", "q: quit", "r: refresh"}
 	default:
-		hints = "Tab: switch  ↑↓/jk: nav  ←→/hl: expand  Enter: open  q: quit  r: refresh  /: filter"
+		hints = []string{"Tab: switch", "↑↓/jk: nav", "←→/hl: expand", "Enter: open", "q: quit", "r: refresh", "/: filter"}
 	}
 
-	bar := fmt.Sprintf(" Agents: %d/%d  |  Files: %d  |  Focus: %s  |  %s",
-		connected, len(m.agents), len(m.files), focusStr, hints)
+	counters := fmt.Sprintf("Agents: %d/%d  |  Files: %d  |  Focus: %s",
+		connected, len(m.agents), len(m.files), focusStr)
+
+	var bar string
 	if m.filtering {
 		bar = " Filter: " + filterStyle.Render(m.filterBuffer+"_")
 	} else if m.filter != "" {
 		bar = " Filter: " + filterStyle.Render(m.filter) + "  (esc to clear)"
 	}
-	return statusBarStyle.Width(m.width).Render(bar)
+
+	if bar == "" {
+		// Counters plus as many hints as fit on one line, including the
+		// status bar's own horizontal padding.
+		budget := m.width - statusBarPadding
+		bar = counters
+		for _, hint := range hints {
+			candidate := bar + "  |  " + hint
+			if lipgloss.Width(candidate) > budget {
+				break
+			}
+			bar = candidate
+		}
+		if lipgloss.Width(bar) > budget {
+			bar = truncateText(bar, budget)
+		}
+	}
+
+	// MaxWidth guarantees a single line: it clips instead of wrapping.
+	return statusBarStyle.MaxWidth(m.width).Render(truncateText(bar, m.width))
 }
 
 func (m *model) loadSelected() tea.Cmd {
