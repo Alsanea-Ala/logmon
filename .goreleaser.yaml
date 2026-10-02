@@ -1,8 +1,13 @@
 # GoReleaser configuration.
 #
-# Tag-driven: GoReleaser does not compute versions. A human decides the
-# version, creates the tag, and pushes it. Pushing the tag is what triggers
-# .github/workflows/release.yml.
+# Publishing is driven by the tag, not by this file: nothing here computes a
+# version. The version is decided by .github/workflows/release-tag.yml, which
+# reads the commits since the previous `chore: vX.Y.Z` commit, writes
+# CHANGELOG.md, and creates the tag. This workflow is what runs once that tag
+# exists — see .github/workflows/publish.yml.
+#
+# A tag pushed by hand publishes through the same pipeline, so there is still
+# a way to cut a release without waiting for a commit on main.
 #
 # Validate locally with: goreleaser check
 # Dry run without publishing: goreleaser release --snapshot --clean
@@ -47,10 +52,60 @@ archives:
   - ids:
       - agent
       - server
-    name_template: "{{ .Binary }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     # `formats` is the v2 spelling. v1 used `format`.
+    # tar.zst is backed by pkg/archive/tarzst, verified present in v2.
     formats:
       - tar.gz
+      - tar.zst
+    # No {{ .Os }}_{{ .Arch }} here. `.Binary` is already the expanded
+    # `binary:` template, which already ends in _linux_amd64, so appending
+    # them again produced logmon-agent_linux_amd64_v0.1.0_linux_amd64.tar.gz.
+    name_template: "{{ .Binary }}_{{ .Version }}"
+
+# System packages. One entry per binary, because each package ships exactly
+# one executable rather than an archive of both.
+#
+# The key is `nfpms`. `nfpkg` is the name of the underlying tool, not the
+# GoReleaser config key, and GoReleaser rejects the file as unknown.
+nfpms:
+  # `id` must be unique per entry; both entries would otherwise default to
+  # "default" and collide.
+  - id: agent
+    # Which build's binaries go in. Distinct from this entry's own `id`.
+    ids:
+      - agent
+    package_name: logmon-agent
+    maintainer: "Alsanea-Ala <ala0alsanea@gmail.com>"
+    homepage: "https://github.com/Alsanea-Ala/logmon"
+    license: AGPL-3.0
+    # Debian caps the synopsis near 80 characters. Kept factual: what it
+    # collects, and that there is a dashboard.
+    description: >-
+      Log aggregator for files, journald, and Docker with a TUI dashboard.
+    formats:
+      - deb
+      - rpm
+    # `bindir` is a single string, and already defaults to /usr/bin.
+    bindir: /usr/bin
+    # No `contents`. GoReleaser adds the binaries itself, and it installs
+    # them under the name they were built with -- logmon-agent_linux_amd64,
+    # because builds.binary carries the os/arch suffix to keep the two
+    # architectures from colliding in dist/. Renaming it inside the package
+    # would mean listing it here too, which duplicates what GoReleaser adds.
+
+  - id: server
+    ids:
+      - server
+    package_name: logmon-server
+    maintainer: "Alsanea-Ala <ala0alsanea@gmail.com>"
+    homepage: "https://github.com/Alsanea-Ala/logmon"
+    license: AGPL-3.0
+    description: >-
+      Log aggregator for files, journald, and Docker with a TUI dashboard.
+    formats:
+      - deb
+      - rpm
+    bindir: /usr/bin
 
 checksum:
   name_template: checksums.txt
@@ -63,13 +118,19 @@ changelog:
       # Conventional Commits 1.0.0 allows changes that do not affect the
       # public API to be left out of the changelog. Only feat, fix, perf,
       # and breaking changes reach release notes.
-      - "^ref:"
-      - "^chore:"
-      - "^docs:"
-      - "^test:"
-      - "^ci:"
-      - "^build:"
-      - "^style:"
+      #
+      # These must stay identical to the skip patterns in cliff.toml, so the
+      # committed CHANGELOG.md and the GitHub Release list the same commits.
+      # The scoped form matters: a plain "^docs:" silently fails on
+      # "docs(readme): ...", which would leak it into the release notes.
+      # Single-quoted YAML, so these backslashes reach the regex engine as-is.
+      - '^ref(?:\(.*\))?!?:'
+      - '^chore(?:\(.*\))?!?:'
+      - '^docs(?:\(.*\))?!?:'
+      - '^test(?:\(.*\))?!?:'
+      - '^ci(?:\(.*\))?!?:'
+      - '^build(?:\(.*\))?!?:'
+      - '^style(?:\(.*\))?!?:'
 
 release:
   draft: false
