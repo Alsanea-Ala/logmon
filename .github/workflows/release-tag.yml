@@ -1,0 +1,179 @@
+name: release-tag
+
+# Gated on ci.yml rather than duplicating it. workflow_run fires for every
+# ci.yml completion, including branch pushes, so the head_branch check is what
+# keeps a release off anything that is not main.
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-tag
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: bump, changelog, tag
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Required. The range since the last release commit needs the whole
+          # history; a shallow clone makes the commit range and the changelog
+          # both come out wrong.
+          fetch-depth: 0
+          # workflow_run checks out the default branch by default, not the
+          # commit that was actually tested.
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      # install-only so the version decision stays in one readable shell
+      # script below rather than being split across action outputs.
+      - uses: orhun/git-cliff-action@v4
+        with:
+          install-only: true
+          config: cliff.toml
+
+      - id: bump
+        name: classify commits and compute the next version
+        env:
+          # Not an error: a run of docs and chore commits is not a release.
+          NO_RELEASE: exit 0
+        run: |
+          set -euo pipefail
+
+          # ---- range --------------------------------------------------
+          # The previous release commit is the boundary. Its subject is
+          # exactly "chore: vX.Y.Z", so match that and nothing looser.
+          #
+          # With no previous release, every commit is in range. That is an
+          # absent range argument, not a root-based one: the root commit has
+          # no parent, so "<root>^..HEAD" is not a valid revision and fails
+          # the whole job on exactly the run that most needs to work.
+          # grep -m1 rather than `| head -1`: head exits at the first line and
+          # SIGPIPEs grep, which pipefail reports as failure.
+          LAST=$(git log --format='%H %s' \
+            | grep -m1 -E '^[0-9a-f]{40} chore: v[0-9]+\.[0-9]+\.[0-9]+$' \
+            | cut -d' ' -f1 || true)
+          RANGE=${LAST:+"$LAST^..HEAD"}
+          echo "range: ${RANGE:-all commits on this branch}"
+
+          # ---- one snapshot of the subjects ---------------------------
+          # Every rule below greps this variable through a here-string
+          # instead of running a fresh `git log | grep -q` pipeline.
+          #
+          # That is not a style preference. `grep -q` exits the moment it
+          # matches; git log then dies of SIGPIPE with status 141, and under
+          # `set -o pipefail` the pipeline reports failure. So a range that
+          # does contain a feat looks identical to one that does not, every
+          # rule evaluates false, and the job exits 0 without tagging
+          # anything -- a release pipeline that silently never releases.
+          # Reproduced against the real 30-commit history; it does not
+          # reproduce in a small synthetic repo, where git log finishes
+          # writing before grep -q exits.
+          SUBJECTS=$(git log --format='%s' $RANGE)
+
+          # ---- rules --------------------------------------------------
+          # only docs ref ci chore build  ->  no release
+          # fix or perf                   ->  patch
+          # feat                           ->  minor
+          # "!" in the subject, or a BREAKING CHANGE footer  ->  major
+          #
+          # Major is tested first so it wins over the others.
+          #
+          # A footer cannot be found by grepping the subject, and a substring
+          # match over the whole message false-positives: commit f2e9360
+          # quotes the phrase inside a fenced code block. Testing only the
+          # last line of the final paragraph is footer-correct and rejects
+          # that commit. Verified against all of main: zero real footers.
+          # Same trap as above: `... | grep -q .` would SIGPIPE awk and read a
+          # genuine BREAKING CHANGE footer as absent, quietly cutting a patch
+          # where a major was required. Command substitution reads to the end
+          # and has no pipeline to fail.
+          BREAKING=false
+          for sha in $(git log --format='%H' $RANGE); do
+            FOOTER=$(awk 'BEGIN{RS=""} NF{n=split($0,L,"\n");
+                                    if (L[n] ~ /^BREAKING[ -]CHANGE:/) print L[n]}' \
+                     <<<"$(git log -1 --format='%B' "$sha")")
+            if [ -n "$FOOTER" ]; then
+              echo "breaking: $(git log -1 --format='%h %s' "$sha")"
+              BREAKING=true
+              break
+            fi
+          done
+
+          # $RANGE stays unquoted: empty means every commit, and quoting it
+          # would pass an empty-string revision to git.
+          if [ "$BREAKING" = true ] \
+            || grep -qE '^[a-z]+(\([^)]+\))?!:' <<<"$SUBJECTS"; then
+            BUMP=major
+          elif grep -qE '^feat(\([^)]+\))?:' <<<"$SUBJECTS"; then
+            BUMP=minor
+          elif grep -qE '^(fix|perf)(\([^)]+\))?:' <<<"$SUBJECTS"; then
+            BUMP=patch
+          else
+            BUMP=none
+          fi
+
+          if [ "$BUMP" = none ]; then
+            echo "no release-worthy commit in this range, stopping"
+            echo "$NO_RELEASE"
+          fi
+
+          # ---- version ------------------------------------------------
+          # The first release is v0.1.0 whatever the history says; applying
+          # the rules to it would derive v0.2.0 from a 0.1.0 base that never
+          # existed.
+          if [ -z "$LAST" ] && [ -z "$(git tag -l 'v*')" ]; then
+            VERSION=v0.1.0
+          else
+            BASE=$(git describe --tags --abbrev=0 | sed 's/^v//')
+            IFS=. read -r MAJ MI PA <<<"$BASE"
+            case "$BUMP" in
+              major) MAJ=$((MAJ+1)); MI=0; PA=0 ;;
+              minor) MI=$((MI+1));  PA=0 ;;
+              patch) PA=$((PA+1)) ;;
+            esac
+            VERSION="v$MAJ.$MI.$PA"
+          fi
+          echo "bump: $BUMP -> $VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: update CHANGELOG.md
+        run: git cliff --unreleased --tag "${{ steps.bump.outputs.version }}" --output CHANGELOG.md
+
+      - name: commit, tag, push, dispatch
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          # The runner checkout has no identity configured.
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add CHANGELOG.md
+          git commit -m "chore: $VERSION"
+          git tag -a "$VERSION" -m "Release $VERSION"
+          git push origin HEAD:main --follow-tags
+
+          # Both refs are pushed with GITHUB_TOKEN, and GitHub suppresses
+          # workflow runs for token-created refs. Two consequences, one
+          # intended and one not:
+          #   ci.yml is skipped for this commit  -- intended, the release
+          #     commit only touches CHANGELOG.md
+          #   publish.yml is skipped for this tag  -- not intended, which is
+          #     why repository_dispatch exists here. It is one of the two
+          #     events exempt from the suppression rule.
+          gh api "repos/$GITHUB_REPOSITORY/dispatches" \
+            -f event_type=release-tagged \
+            -f "client_payload[tag]=$VERSION"

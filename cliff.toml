@@ -1,0 +1,68 @@
+# Git-cliff configuration for CHANGELOG.md.
+#
+# Only rendering lives here. The version number is decided by
+# .github/workflows/release-tag.yml, which applies an explicit rules table to
+# the commits since the previous `chore: vX.Y.Z` commit. Deciding the bump in
+# shell rather than in this file is deliberate: a rules table you can read is
+# easier to review than a commit-parser config that derives versions
+# indirectly.
+#
+# Preview locally:  git cliff --unreleased
+# Render a release: git cliff --unreleased --tag v0.2.0 --output CHANGELOG.md
+
+[changelog]
+# Newest release first, which is what a reader opening the file expects.
+header = """
+# Changelog
+
+All notable changes to this project are recorded here. Versions follow
+[Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/); the
+rules that map commits to versions are in [CONTRIBUTING.md](CONTRIBUTING.md).
+"""
+body = """
+{% if version %}\
+## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+{% else %}\
+## [unreleased]
+{% endif %}{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptag | trim | upper_first }}
+
+{% for commit in commits %}
+- {{ commit.id | shorten }} {{ commit.message | upper_first }}
+{%- endfor %}
+
+{% endfor %}\
+"""
+footer = ""
+
+[git]
+conventional_commits = true
+filter_out_unconventional = false
+filter_commits = false
+
+# Single-quoted TOML literal strings throughout: a basic string treats \( and
+# \) as invalid escape sequences, so every regex here would fail to parse.
+# In a literal string the backslashes are regex backslashes and nothing else.
+
+# Drops the types that never produce a release, mirroring the
+# changelog.filters.exclude list in .goreleaser.yaml so the file and the
+# published release notes agree. `ref` is legacy but still in history.
+#
+# These commits are still read by the bump decision in release-tag.yml;
+# excluding them here only keeps them out of the rendered file.
+commit_parsers = [
+  { message = '^ref(?:\(.*\))?!?:', skip = true },
+  { message = '^chore(?:\(.*\))?!?:', skip = true },
+  { message = '^docs(?:\(.*\))?!?:', skip = true },
+  { message = '^ci(?:\(.*\))?!?:', skip = true },
+  { message = '^build(?:\(.*\))?!?:', skip = true },
+  { message = '^test(?:\(.*\))?!?:', skip = true },
+  { message = '^style(?:\(.*\))?!?:', skip = true },
+]
+
+# The version boundary is the tag, not the release commit, so an untagged
+# range is exactly what has not shipped.
+tag_pattern = '^v[0-9]+\.[0-9]+\.[0-9]+$'
+
+sort = "topo"
+topo_order = true
