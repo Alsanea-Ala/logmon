@@ -1,0 +1,90 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - master
+      - "feat/**"
+  pull_request:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (fmt, vet, lint, unit-test, build-test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # make fmt runs `go fmt ./...`, which rewrites files. Lefthook uses
+      # stage_fixed locally; CI has no equivalent escape hatch, so the diff
+      # check is what turns a formatting regression into a failure instead
+      # of a surprise on the next contributor's machine.
+      - name: fmt (check only)
+        run: |
+          make fmt
+          git diff --exit-code
+
+      - run: make vet
+      - run: make lint
+      - run: make test
+      - run: make build
+
+  # No `needs:` here on purpose: this runs in parallel with test rather than
+  # after it. internal/agent is goroutine-per-source feeding a single sender
+  # with shared cursor state, and its collectors have no unit coverage, so
+  # this is where a genuine data race would surface. Separate job also means
+  # a race report is not buried at the bottom of a five-step log.
+  race:
+    name: race
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - run: go test -race ./...
+
+  # Compile check only. GoReleaser produces the real binaries in
+  # release.yml, so nothing is handed to a publish step here.
+  build:
+    name: build (${{ matrix.goos }}/${{ matrix.goarch }})
+    needs: [test, race]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Cross-compile
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: go build -trimpath -o /dev/null ./cmd/...

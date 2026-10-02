@@ -1,0 +1,76 @@
+# GoReleaser configuration.
+#
+# Tag-driven: GoReleaser does not compute versions. A human decides the
+# version, creates the tag, and pushes it. Pushing the tag is what triggers
+# .github/workflows/release.yml.
+#
+# Validate locally with: goreleaser check
+# Dry run without publishing: goreleaser release --snapshot --clean
+
+version: 2
+
+project_name: logmon
+
+builds:
+  - id: agent
+    main: ./cmd/agent
+    binary: logmon-agent_{{ .Os }}_{{ .Arch }}
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    # Pin mtime to the commit time so the same source always produces the
+    # same checksum. The README tells users to verify with sha256sum, so
+    # reproducible output matters.
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+  - id: server
+    main: ./cmd/server
+    binary: logmon-server_{{ .Os }}_{{ .Arch }}
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - ids:
+      - agent
+      - server
+    name_template: "{{ .Binary }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    # `formats` is the v2 spelling. v1 used `format`.
+    formats:
+      - tar.gz
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  # Without this the changelog is newest-first and reads backwards.
+  sort: asc
+  filters:
+    exclude:
+      # Conventional Commits 1.0.0 allows changes that do not affect the
+      # public API to be left out of the changelog. Only feat, fix, perf,
+      # and breaking changes reach release notes.
+      - "^ref:"
+      - "^chore:"
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - "^build:"
+      - "^style:"
+
+release:
+  draft: false
+  prerelease: auto
