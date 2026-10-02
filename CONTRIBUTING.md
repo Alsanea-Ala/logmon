@@ -66,18 +66,66 @@ known scaling limit, not an oversight.
 
 ## Commit messages
 
-This repository does not follow Conventional Commits strictly. Observed forms:
+This project follows [Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/).
 
-| Form | Use |
-|---|---|
-| `feat(server): ingest and TUI` | New behaviour, with a scope |
-| `fix(tui): render header on first frame` | Bug fix, with a scope |
-| `docs: rewrite README` | Documentation only |
-| `chore: project tooling` | Tooling, deps, config |
-| `ref: init lib` | Refactor with no behaviour change |
+```
+<type>[optional scope]: <description>
 
-`ref:` is not a Conventional Commit type. It is used in this history; match it
-rather than introducing a new vocabulary.
+[optional body]
+
+[optional footer(s)]
+```
+
+Allowed types: `feat`, `fix`, `perf`, `refactor`, `docs`, `style`, `test`,
+`build`, `ci`, `chore`, `revert`.
+
+| Form | Use | Release |
+|---|---|---|
+| `feat(server): ingest and TUI` | New behaviour | minor |
+| `fix(tui): render header on first frame` | Bug fix | patch |
+| `perf(agent): batch records per ACK` | Performance change, no behaviour change | patch |
+| `refactor: extract token hashing` | Internal restructuring | none |
+| `docs: rewrite README` | Documentation | none |
+| `test: cover rotation detection` | Tests only | none |
+| `build: pin toolchain in go.mod` | Build system, deps, toolchain | none |
+| `ci: add race job` | Pipelines and automation | none |
+| `chore: project tooling` | Maintenance with no source effect | none |
+
+Scope is optional and goes in parentheses: `feat(agent): ...`.
+
+A breaking change is marked either with `!` before the colon, or with a footer:
+
+```
+feat(agent)!: require an explicit hostname
+
+BREAKING CHANGE: agent configs without hostname no longer start.
+```
+
+The Release column reflects what GoReleaser puts in the changelog. Per the
+specification, changes that do not affect the public API — `docs`, `style`,
+`test` — may be excluded, so they do not by themselves produce a release. That
+is why a run of `docs:` and `chore:` commits yields no version: nobody tags,
+nothing publishes.
+
+Tag-driven, so the version is a human decision:
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+`lefthook.yml` enforces the subject format on commit-msg.
+
+Note: earlier commits in this history use `ref:`, which is not a specification
+type. Those commits are already published and cannot be rewritten without
+rewriting `master`, so `ref:` is accepted for existing history only. New
+refactors must use `refactor:`.
+
+## Releases
+
+GoReleaser builds and publishes on a tag push; see `.goreleaser.yaml` and
+`.github/workflows/release.yml`. No CI job creates or pushes a tag, which
+keeps a reviewed human between choosing a version and publishing binaries.
+`go install .../cmd/server@latest` resolves once a `v*` tag exists.
 
 ## Branches and pull requests
 
