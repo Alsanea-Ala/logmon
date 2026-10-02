@@ -101,6 +101,44 @@ func TestLoadRecordsKeepsLatestAndReportsMalformedData(t *testing.T) {
 	}
 }
 
+func TestViewRendersHeader(t *testing.T) {
+	sizes := []struct {
+		name   string
+		width  int
+		height int
+	}{
+		{"wide", 250, 60},
+		{"desktop", 120, 30},
+		{"medium", 100, 30},
+		{"narrow", 80, 24},
+		{"short", 120, 14},
+		{"tiny", 20, 5},
+	}
+	for _, size := range sizes {
+		t.Run(size.name, func(t *testing.T) {
+			m := newModel(t.TempDir())
+			m.width, m.height = size.width, size.height
+			out := m.View()
+			if size.width < 40 || size.height < 10 {
+				if out == "" {
+					t.Fatal("view must never be empty")
+				}
+				return
+			}
+			lines := strings.SplitN(out, "\n", 2)
+			if !strings.Contains(lines[0], "LOGMON DASHBOARD") {
+				t.Fatalf("header missing at %dx%d, first line: %q", size.width, size.height, lines[0])
+			}
+			if !strings.Contains(out, "v"+Version) {
+				t.Fatalf("version missing at %dx%d", size.width, size.height)
+			}
+			if !strings.Contains(out, "Agents:") {
+				t.Fatalf("status bar missing at %dx%d", size.width, size.height)
+			}
+		})
+	}
+}
+
 func TestTUIRejectsStaleResultsAndMergesLiveRecords(t *testing.T) {
 	now := time.Now().UTC()
 	path := filepath.Join(t.TempDir(), now.Format(time.DateOnly), "billing", "prod-1.jsonl")
