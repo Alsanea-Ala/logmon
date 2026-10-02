@@ -7,7 +7,7 @@
 ╚══════╝ ╚═════╝  ╚═════╝ ╚═╝     ╚═╝ ╚═════╝ ╚═╝  ╚═══╝
 ```
 
-
+[![StandWithPalestine](https://raw.githubusercontent.com/Safouene1/support-palestine-banner/master/StandWithPalestine.svg)](https://github.com/Safouene1/support-palestine-banner/blob/master/Markdown-pages/Support.md)
 
 # Logmon
 
@@ -171,6 +171,11 @@ yet. To build from source instead, see [Build](#build).
 Unknown YAML keys fail startup. Agent IDs and app names accept letters,
 numbers, `.`, `_`, and `-`; tokens must contain at least 32 characters.
 
+`hostname` is required and has no default. Logmon does not fall back to
+`os.Hostname()`, because the value is stored with every record and a silently
+inferred one can differ from the name you use everywhere else. Set it in YAML
+or pass `--hostname`.
+
 Ready-to-copy templates are in [`examples/`](examples/):
 
 ```bash
@@ -202,7 +207,7 @@ users.
 ### Server YAML
 
 ```yaml
-listen: 10.0.0.5:9000
+listen: <server-ip>:<port>
 data_dir: /var/lib/logmon
 max_connections: 100
 agents:
@@ -228,7 +233,7 @@ server is not useful without an allowlist, so production runs should always pass
 ```yaml
 id: prod-1
 hostname: api-01
-server: 10.0.0.5:9000
+server: <server-ip>:<port>
 token: "<original-random-token>"
 retry: true
 retry_delay: 2s
@@ -255,7 +260,7 @@ sources:
 | Field | Required | Default | Meaning |
 |---|---|---|---|
 | `id` | Yes | None | Stable allowlisted agent ID |
-| `hostname` | No | `os.Hostname()` | Host label stored with records |
+| `hostname` | Yes | None | Host label stored with records, 1-255 characters |
 | `server` | No | `127.0.0.1:9000` | Server TCP address |
 | `token` | Yes unless environment is set | `LOGMON_AGENT_TOKEN` | Authentication secret |
 | `retry` | No | `true` | Restart failed sources and reconnect TCP |

@@ -26,13 +26,6 @@ func Run(ctx context.Context, cfg Config) error {
 		return err
 	}
 	hostname := cfg.Hostname
-	if hostname == "" {
-		var err error
-		hostname, err = os.Hostname()
-		if err != nil {
-			return fmt.Errorf("get hostname: %w", err)
-		}
-	}
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()

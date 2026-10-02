@@ -13,8 +13,10 @@
 # Must match an agent ID in the server allowlist.
 id: prod-1
 
-# Optional host label stored with every record. Defaults to os.Hostname().
-# hostname: api-01
+# Required. Host label stored with every record, 1-255 characters.
+# There is no os.Hostname() fallback, so set it explicitly. Replace this
+# with the name you use for this host elsewhere.
+hostname: api-01
 
 # Server TCP address.
 server: 127.0.0.1:9000

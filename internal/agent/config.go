@@ -26,7 +26,7 @@ type Source struct {
 
 type Config struct {
 	ID         string        `yaml:"id"`
-	Hostname   string        `yaml:"hostname,omitempty"`
+	Hostname   string        `yaml:"hostname"`
 	Server     string        `yaml:"server"`
 	Token      string        `yaml:"token,omitempty"`
 	Retry      bool          `yaml:"retry"`
@@ -104,6 +104,14 @@ func ParseSource(kind, spec string) (Source, error) {
 func (cfg Config) Validate() error {
 	if !protocol.ValidName(cfg.ID) {
 		return fmt.Errorf("agent id must contain only letters, numbers, dot, dash, or underscore")
+	}
+	// Mirrors the server-side handshake check, so an agent that validates
+	// locally cannot still be rejected at connect time.
+	if cfg.Hostname == "" {
+		return fmt.Errorf("agent hostname is required")
+	}
+	if len(cfg.Hostname) > 255 {
+		return fmt.Errorf("agent hostname must be at most 255 characters")
 	}
 	if cfg.Server == "" {
 		return fmt.Errorf("server address is required")

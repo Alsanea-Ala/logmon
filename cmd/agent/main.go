@@ -80,15 +80,6 @@ func newCommand(run func(context.Context, agent.Config) error) *cobra.Command {
 				}
 			}
 
-			// resolve hostname before validation + banner
-			if cfg.Hostname == "" {
-				if h, err := os.Hostname(); err == nil {
-					cfg.Hostname = h
-				} else {
-					cfg.Hostname = "unknown"
-				}
-			}
-
 			validationErr := cfg.Validate()
 
 			// start animated banner
@@ -113,7 +104,7 @@ func newCommand(run func(context.Context, agent.Config) error) *cobra.Command {
 	flags := cmd.Flags()
 	flags.StringVar(&opts.config, "config", "", "optional YAML config path")
 	flags.StringVar(&opts.id, "id", "", "agent ID")
-	flags.StringVar(&opts.hostname, "hostname", "", "hostname override")
+	flags.StringVar(&opts.hostname, "hostname", "", "agent hostname label; required unless set in YAML")
 	flags.StringVar(&opts.server, "server", defaults.Server, "server host:port")
 	flags.BoolVar(&opts.retry, "retry", defaults.Retry, "retry failed sources and connections")
 	flags.DurationVar(&opts.retryDelay, "retry-delay", defaults.RetryDelay, "delay before retry")
