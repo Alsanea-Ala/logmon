@@ -145,21 +145,27 @@ jobs:
           echo "bump: $BUMP -> $VERSION"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      # Rewrites CHANGELOG.md in full from git history, so the file always
-      # matches the commits rather than accumulating edits.
+      # Adds the new release above the existing ones.
       #
-      # OUTPUT is the action's run.sh hook; its default is
-      # git-cliff/CHANGELOG.md, which would leave the real file untouched.
+      # --prepend, not --output. `--unreleased --output CHANGELOG.md` renders
+      # only the unreleased commits as a single release, so the second release
+      # would truncate the file to one section and erase every earlier
+      # version. Confirmed with v2.14.2 against this repo's history.
+      #
+      # No OUTPUT env on purpose. The action's run.sh always exports
+      # GIT_CLIFF_OUTPUT, and git-cliff rejects the combination outright:
+      #   ArgumentError("'-o' and '-p' can only be used together if they
+      #                   point to different files")
+      # Its default, git-cliff/CHANGELOG.md, differs from the prepend target,
+      # which is what has to happen. run.sh mkdirs it before invoking.
       - name: update CHANGELOG.md
         uses: orhun/git-cliff-action@v4
-        env:
-          OUTPUT: CHANGELOG.md
         with:
           config: cliff.toml
           # Pinned rather than left to the action's default, so a bump in
           # upstream does not silently change what renders this file.
           version: v2.14.2
-          args: --unreleased --tag ${{ steps.bump.outputs.version }} -v
+          args: --unreleased --tag ${{ steps.bump.outputs.version }} --prepend CHANGELOG.md -v
 
       - name: commit, tag, push, dispatch
         env:
