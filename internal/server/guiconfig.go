@@ -33,6 +33,7 @@ type guiConfig struct {
 	SidePanelWidth float64  `yaml:"sidePanelWidth"`
 	Graph          *bool    `yaml:"graph"`
 	Wrap           *bool    `yaml:"wrap"`
+	Mouse          *bool    `yaml:"mouse"`
 	Theme          guiTheme `yaml:"theme"`
 }
 
@@ -72,6 +73,13 @@ func defaultGUIConfig() guiConfig {
 		SidePanelWidth: defaultSideRatio,
 		Graph:          &on,
 		Wrap:           &off,
+		// Off, and deliberately so. Terminal mouse reporting takes over text
+		// selection: with it enabled, dragging does not select, and copying a
+		// log line is the most common thing anyone does with one. There is no
+		// key to turn this on because Bubble Tea negotiates the reporting mode
+		// with the terminal at startup and cannot renegotiate from inside the
+		// program.
+		Mouse: &off,
 	}
 }
 
@@ -280,6 +288,9 @@ func (m *model) applyGUIConfig(cfg guiConfig) {
 	}
 	if cfg.Wrap != nil {
 		m.wrap = *cfg.Wrap
+	}
+	if cfg.Mouse != nil {
+		m.mouseEnabled = *cfg.Mouse
 	}
 
 	// Theme errors are caught by validate before here, so this cannot fail on a
