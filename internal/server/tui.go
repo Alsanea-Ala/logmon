@@ -2922,13 +2922,6 @@ func recordMatches(record protocol.StoredRecord, needle string, scope filterScop
 	return strings.Contains(strings.ToLower(haystack), needle)
 }
 
-// filterActive reports whether anything is narrowing the panel, so the empty
-// state can say "nothing matched" rather than "nothing here".
-func (m *model) filterActive() bool {
-	return m.filter != "" || m.agentFilter != "" || m.window() > 0 ||
-		(len(m.categories) > 0 && m.categoryIndex > 0)
-}
-
 func (m *model) ensureFile(file logFile) int {
 	for i := range m.files {
 		if m.files[i].Path == file.Path {

@@ -83,11 +83,6 @@ func TestFocusedPanelGetsTwoThirdsWhenThereIsRoom(t *testing.T) {
 		l := m.computeLayout()
 
 		needOthers := m.panelRows(len(m.agents)) + m.panelRows(len(m.treeFlattened))
-		if focus == focusMain {
-			needOthers -= panelMinRows * 2
-			needOthers += panelMinRows*2 - m.panelRows(len(m.agents))
-			needOthers = m.panelRows(len(m.agents)) + m.panelRows(len(m.treeFlattened))
-		}
 		if focus == focusAgents {
 			needOthers = m.panelRows(len(m.treeFlattened)) + panelMinRows*2
 		}

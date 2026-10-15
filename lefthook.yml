@@ -7,6 +7,12 @@ pre-commit:
     vet:
       run: make vet
     lint:
-      run: make lint
+      # The pin is load-bearing, not decoration. golangci-lint v2.12 bundles a
+      # staticcheck whose buildir panics on a stdlib newer than go.mod's, and
+      # GOTOOLCHAIN=auto picks the newer local toolchain because go.mod states
+      # only a minimum. Without the pin this reports a panic instead of a
+      # finding. It must equal go.mod, which is what CI installs; a test fails
+      # when the two drift.
+      run: GOTOOLCHAIN=go1.25.7 make lint
     test:
       run: make test
