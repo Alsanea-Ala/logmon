@@ -229,16 +229,6 @@ jobs:
         if: steps.bump.outputs.version != ''
         run: git checkout -B "release/${{ steps.bump.outputs.version }}"
 
-      # Proves the secret exists and which account it acts as, before anything is
-      # pushed. If this does not print Alsanea-Ala the secret is missing,
-      # expired, or misnamed, and no amount of push configuration helps.
-      # DELETE once a release has gone green.
-      - name: whoami (TEMP, delete after first green release)
-        if: steps.bump.outputs.version != ''
-        env:
-          GH_TOKEN: ${{ secrets.ACTIONS_PUSH_TOKEN }}
-        run: gh api user -q .login
-
       - name: commit, tag, push
         if: steps.bump.outputs.version != ''
         env:
