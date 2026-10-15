@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/Alsanea-Ala/logmon/internal/protocol"
 	tea "github.com/charmbracelet/bubbletea"
@@ -42,6 +43,8 @@ const (
 	// leaves the log panel four usable rows at the smallest supported size.
 	mainMinWidth   = 20
 	separatorWidth = 2
+	// Width below which the severity badge is dropped from the gutter.
+	minWidthForBadge = 46
 
 	// statusBarStyle pads one column each side.
 	statusBarPadding = 2
@@ -314,6 +317,23 @@ type styles struct {
 	divider      lipgloss.Style
 	header       lipgloss.Style
 	helpKey      lipgloss.Style
+
+	// One style per severity level, built on demand by severityStyles.
+	warn  lipgloss.Style
+	info  lipgloss.Style
+	debug lipgloss.Style
+	plain lipgloss.Style
+}
+
+// severityStyles returns the text styles for the severity levels. Separate
+// from the other styles because they are keyed by level rather than by role.
+func (p palette) severityStyles() styles {
+	s := p.styles()
+	s.warn = lipgloss.NewStyle().Foreground(p.Warn)
+	s.info = lipgloss.NewStyle().Foreground(p.Ok)
+	s.debug = lipgloss.NewStyle().Foreground(p.Muted)
+	s.plain = lipgloss.NewStyle().Foreground(p.Title)
+	return s
 }
 
 func (m *model) Init() tea.Cmd {
@@ -1059,8 +1079,81 @@ func truncateText(s string, width int) string {
 	return string(runes) + "…"
 }
 
+// severity is the level a log line is drawn at.
+//
+// Derived from the text of the line, because nothing on the wire says what
+// level a record is: protocol.StoredRecord carries a Category string that the
+// agent configured, and that is a user-chosen label rather than a level.
+type severity int
+
+const (
+	severityPlain severity = iota
+	severityDebug
+	severityInfo
+	severityWarn
+	severityError
+)
+
+func (s severity) String() string {
+	switch s {
+	case severityError:
+		return "ERR"
+	case severityWarn:
+		return "WRN"
+	case severityInfo:
+		return "INF"
+	case severityDebug:
+		return "DBG"
+	default:
+		return ""
+	}
+}
+
+// severityKeywords maps the marker words to a level, highest first.
+//
+// Word matching, not substring: "error" appears inside "errors" and inside
+// paths like /var/log/errors/, and a substring match paints half a log red.
+// Splitting on non-alphanumerics keeps "errors" matching but leaves
+// "erroneous_value" alone.
+var severityKeywords = []struct {
+	words []string
+	level severity
+}{
+	{[]string{"error", "err", "fatal", "panic", "exception", "critical", "failed", "failure"}, severityError},
+	{[]string{"warn", "warning", "deprecated"}, severityWarn},
+	{[]string{"info", "notice"}, severityInfo},
+	{[]string{"debug", "trace", "verbose"}, severityDebug},
+}
+
+// detectSeverity scans a log line for a level marker and returns the highest
+// one found.
+//
+// Order matters and it is not alphabetical: a line reading "error: failed to
+// connect" must be an error, not a warning, so the highest level has to win
+// regardless of where in the line it appears.
+func detectSeverity(line string) severity {
+	fields := strings.FieldsFunc(line, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_'
+	})
+	if len(fields) == 0 {
+		return severityPlain
+	}
+
+	for _, entry := range severityKeywords {
+		for _, field := range fields {
+			word := strings.ToLower(field)
+			for _, want := range entry.words {
+				if word == want {
+					return entry.level
+				}
+			}
+		}
+	}
+	return severityPlain
+}
+
 func (m *model) renderMain(width, height int) string {
-	st := m.p.styles()
+	st := m.p.severityStyles()
 
 	innerWidth := width - textWidth
 	if innerWidth < 1 {
@@ -1106,19 +1199,49 @@ func (m *model) renderMain(width, height int) string {
 			rec := records[i]
 			stamp := rec.ReceivedAt.Format("15:04:05")
 			category := safeText(rec.Category)
-			// Fixed gutter (marker + time + padded category) keeps messages
-			// starting at the same column.
-			gutter := fmt.Sprintf("%s %s %-12s ", marker, stamp, category)
+			level := detectSeverity(rec.Line)
+
+			// The badge is dropped first on a narrow panel: it is three
+			// characters of decoration, and the colour still carries the
+			// level even once the text is gone. What is not dropped is the
+			// message itself, which is the reason the panel exists.
+			badge := ""
+			if innerWidth >= minWidthForBadge {
+				if tag := level.String(); tag != "" {
+					badge = tag + " "
+				}
+			}
+			gutter := fmt.Sprintf("%s %s %s%-12s ", marker, stamp, badge, category)
 			body := truncateText(safeText(rec.Line), max(1, innerWidth-lipgloss.Width(gutter)))
 
 			if i == m.lineIndex {
 				rows = append(rows, st.selected.Width(innerWidth).Render(gutter+body))
-			} else {
-				rows = append(rows, marker+
-					st.time.Render(stamp)+
-					st.category.Render(fmt.Sprintf(" %-12s", category))+
-					body)
+				continue
 			}
+
+			var badgeStyle lipgloss.Style
+			switch level {
+			case severityError:
+				badgeStyle = st.error
+			case severityWarn:
+				badgeStyle = st.warn
+			case severityInfo:
+				badgeStyle = st.info
+			case severityDebug:
+				badgeStyle = st.debug
+			default:
+				badgeStyle = st.plain
+			}
+			bodyStyle := badgeStyle
+			if level == severityPlain {
+				bodyStyle = lipgloss.NewStyle()
+			}
+
+			rows = append(rows, marker+
+				st.time.Render(stamp)+" "+
+				badgeStyle.Render(badge)+
+				st.category.Render(fmt.Sprintf("%-12s ", category))+
+				bodyStyle.Render(body))
 		}
 	}
 
