@@ -33,8 +33,24 @@ go test ./internal/server
 go test ./internal/server -run '^TestAuthenticatedRecordIsStoredBeforeAck$'
 ```
 
-Lefthook runs fmt, vet, lint, and tests serially on commit. Bare `make` prints
-the available targets and installs nothing.
+Install the hook once after cloning:
+
+```bash
+lefthook install
+```
+
+Without it nothing gates a commit. `.git/hooks` is not in the repository, so a
+fresh clone has no hook and `lefthook.yml` is only a description of one that
+does not exist. Lefthook then runs fmt, vet, lint, and tests serially on
+commit, and refuses the commit if any of them fails.
+
+Bare `make` prints the available targets and installs nothing.
+
+`make lint` runs under the Go version in `go.mod`, pinned by the hook. Running
+it by hand on a newer toolchain reports a panic from inside the linter rather
+than a finding, because `GOTOOLCHAIN=auto` treats `go.mod` as a minimum and
+prefers your newer local Go. Use `GOTOOLCHAIN=go1.25.7 make lint`, or read the
+pin in `lefthook.yml`.
 
 ## Design constraints
 
