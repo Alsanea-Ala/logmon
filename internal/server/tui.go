@@ -297,6 +297,27 @@ const (
 	paneCount
 )
 
+func (p focusPane) String() string {
+	switch p {
+	case focusAgents:
+		return "Agents"
+	case focusFiles:
+		return "Files"
+	default:
+		return "Logs"
+	}
+}
+
+// panelTitle is the numbered heading on a panel.
+//
+// The number is what makes the digit shortcuts discoverable: nothing else in
+// the frame says that pressing 2 goes to the files. panel() measures the whole
+// label, so the extra characters widen the title bar rather than being counted
+// against the body.
+func panelTitle(pane focusPane) string {
+	return fmt.Sprintf("[%d] %s", int(pane)+1, pane)
+}
+
 type model struct {
 	dataDir       string
 	files         []logFile
@@ -609,6 +630,16 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.focus = (m.focus + 1) % paneCount
 		return m, nil
 
+	case "shift+tab":
+		m.focus = (m.focus + paneCount - 1) % paneCount
+		return m, nil
+
+	case "1", "2", "3":
+		// By rune, not by byte length: len("3") is 1 for every digit, so the
+		// arithmetic would send all three to the first pane.
+		m.focus = focusPane([]rune(msg.String())[0] - '1')
+		return m, nil
+
 	case "up", "k":
 		return m.moveUp()
 
@@ -816,14 +847,14 @@ func (m *model) moveDown() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// moveLeft collapses the node under the cursor in the file tree.
+//
+// It used to also step focus back from the logs to the files, which meant the
+// same key expanded a node in one panel and changed which panel you were in for
+// another. Focus is tab and shift+tab only; an arrow that does nothing in a
+// panel is more predictable than one that silently moves you somewhere else.
 func (m *model) moveLeft() (tea.Model, tea.Cmd) {
-	// From the logs, step back to the file tree rather than jumping past it.
-	if m.focus == focusMain {
-		m.focus = focusFiles
-		return m, nil
-	}
-	// Only the tree has expandable nodes. On the agents panel this is a no-op
-	// rather than a focus change, so left and right stay predictable.
+	// Only the tree has expandable nodes.
 	if m.focus != focusFiles || len(m.treeFlattened) == 0 {
 		return m, nil
 	}
@@ -841,11 +872,9 @@ func (m *model) moveLeft() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// moveRight expands the node under the cursor in the file tree, and changes
+// nothing else. See moveLeft.
 func (m *model) moveRight() (tea.Model, tea.Cmd) {
-	if m.focus == focusAgents {
-		m.focus = focusFiles
-		return m, nil
-	}
 	if m.focus != focusFiles || len(m.treeFlattened) == 0 {
 		return m, nil
 	}
@@ -1255,7 +1284,7 @@ func (m *model) renderAgents(width, height int) string {
 		}
 	}
 
-	return panel("Agents", strings.Join(lines, "\n"), width, height, m.borderStyle, m.focus == focusAgents, m.p)
+	return panel(panelTitle(focusAgents), strings.Join(lines, "\n"), width, height, m.borderStyle, m.focus == focusAgents, m.p)
 }
 
 // agentRows lays out one row per agent, dropping optional columns until the
@@ -1457,7 +1486,7 @@ func (m *model) renderFiles(width, height int) string {
 		lines = append(lines, line)
 	}
 
-	return panel("Files", strings.Join(lines, "\n"), width, height, m.borderStyle, m.focus == focusFiles, m.p)
+	return panel(panelTitle(focusFiles), strings.Join(lines, "\n"), width, height, m.borderStyle, m.focus == focusFiles, m.p)
 }
 
 func nodeDepth(node *fileNode) int {
@@ -1958,7 +1987,7 @@ func (m *model) renderMain(width, height int) string {
 		rows = append(rows, st.error.Render("Error: "+m.err.Error()))
 	}
 
-	return panel("Logs", strings.Join(rows, "\n"), width, height, m.borderStyle, m.focus == focusMain, m.p)
+	return panel(panelTitle(focusMain), strings.Join(rows, "\n"), width, height, m.borderStyle, m.focus == focusMain, m.p)
 }
 
 // recordGutter is the fixed column a record's message starts after: cursor
@@ -2023,11 +2052,13 @@ type keybinding struct {
 var keybindings = []keybinding{
 	{"q, ctrl+c", "quit"},
 	{"?", "toggle this help"},
-	{"tab", "cycle focus: agents, files, logs"},
+	{"tab", "focus the next panel"},
+	{"shift+tab", "focus the previous panel"},
+	{"1/2/3", "focus the agents, files or logs panel"},
 	{"up, k", "move up"},
 	{"down, j", "move down"},
-	{"left, h", "collapse a node, or step back to the files"},
-	{"right, l", "expand a node, or step on to the logs"},
+	{"left, h", "collapse a tree node"},
+	{"right, l", "expand a tree node"},
 	{"enter", "open a node, or filter by the selected agent"},
 	{"r", "rescan storage"},
 	{"g", "toggle the ingest graph"},
@@ -2074,7 +2105,7 @@ func helpRow(b keybinding, keyWidth int, st styles) string {
 func (m *model) renderStatusBar(minimal bool) string {
 	st := m.p.styles()
 	connected := connectedCount(m.agents)
-	focusStr := map[focusPane]string{focusAgents: "Agents", focusFiles: "Files", focusMain: "Logs"}[m.focus]
+	focusStr := m.focus.String()
 
 	// Short hints on narrow terminals, minimal when stacked. Hints are
 	// dropped in order until the bar fits so it never wraps to a second
@@ -2092,7 +2123,7 @@ func (m *model) renderStatusBar(minimal bool) string {
 		// disappeared along with it were how you quit and how you find out
 		// about the key that hides the graph in the first place.
 		hints = []string{"[Tab] switch", "[↑↓/jk] nav", "[←→/hl] expand", "[Enter] open",
-			"[/] filter", "[r] refresh", "[?] help", "[q] quit", "[g] graph"}
+			"[/] filter", "[1/2/3] panel", "[r] refresh", "[?] help", "[q] quit", "[g] graph"}
 	}
 
 	counters := fmt.Sprintf("Agents: %d/%d   Files: %d   Focus: %s",
