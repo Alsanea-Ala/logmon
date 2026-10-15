@@ -587,6 +587,7 @@ gui:
   sidePanelWidth: 0.333    # share of the terminal width, clamped to 0.2-0.6
   graph: true              # ingest graph on by default
   wrap: false              # wrap long log lines on by default
+  mouse: false             # click and wheel support, off by default
   theme:
     borderActive: green
     borderInactive: white
@@ -642,6 +643,45 @@ always, which is one rule rather than two.
 `border: hidden` removes the frames and the panel titles with them. It frees two
 rows in every panel and four columns of width, which is why the graph becomes
 visible at heights where it was previously hidden.
+
+## Mouse Support
+
+Off by default, and deliberately so.
+
+Terminal mouse reporting takes over text selection. With it enabled, dragging
+in the terminal draws a selection rectangle instead of selecting, so you cannot
+copy a log line — which is the most common thing anyone does with one. Opting
+everyone into that to deliver click-to-focus is the wrong trade.
+
+There is no key to turn it on, and that is not an oversight. Bubble Tea
+negotiates the reporting mode with the terminal when the program starts and
+cannot renegotiate from inside it, so a runtime toggle would have to restart the
+whole viewer to take effect.
+
+```yaml
+gui:
+  mouse: true
+```
+
+Then `r` to re-read the config, or restart the server.
+
+With it on:
+
+| Action | Effect |
+|---|---|
+| Click a panel | Focus it |
+| Click a row in the agents list or file tree | Move that panel's cursor there |
+| Click a log line | Select that record |
+| Wheel | Scroll the panel under the pointer |
+
+The wheel scrolls whatever panel the pointer is over rather than the focused
+one, and does not move focus. Scroll is not navigation: someone scrolling a long
+log to find something should not find their cursor has moved to another panel
+halfway down.
+
+Clicks on the header and the status bar do nothing — clicking the version string
+is not a request to focus a panel. Clicking a panel's border does focus it but
+does not move a cursor.
 
 ## Navigation
 

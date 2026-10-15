@@ -167,7 +167,18 @@ func Run(ctx context.Context, cfg Config, noTUI bool, guiConfigPath string) erro
 	// TUI mode
 	model := newModel(cfg.DataDir)
 	model.loadGUI(guiConfigPath)
-	program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithoutSignalHandler())
+
+	// Mouse reporting is requested only when the config asks for it. Asking for
+	// it unconditionally is the difference between a terminal where dragging
+	// selects text and one where it draws a rectangle instead.
+	options := []tea.ProgramOption{tea.WithAltScreen(), tea.WithoutSignalHandler()}
+	if model.mouseEnabled {
+		// Cell motion rather than all motion: press and release are enough for
+		// click and wheel, and reporting every cell the pointer crosses is
+		// traffic for a terminal to swallow.
+		options = append(options, tea.WithMouseCellMotion())
+	}
+	program := tea.NewProgram(model, options...)
 	run.program = program
 	go func() {
 		err := run.serve(ctx, listener)

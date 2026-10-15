@@ -59,6 +59,12 @@ const (
 	// Column reserved for the series label. Wide enough for the agent IDs the
 	// sidebar already renders, and fixed so the bars start at a consistent x.
 	graphLabelWidth = 12
+
+	// Rows the graph block occupies when it is visible: one per series, the
+	// global rate and the selected file's. Declared rather than counted at the
+	// call site so the mouse hit test and the renderer cannot disagree about how
+	// much space the graph takes.
+	graphSeriesRows = 2
 )
 
 // Responsive layout breakpoints (terminal columns/rows).
@@ -571,6 +577,16 @@ type model struct {
 	// wrap is off by default; see the wrapping constants.
 	wrap bool
 
+	// mouseEnabled is off by default and cannot be toggled at runtime.
+	//
+	// Terminal mouse reporting takes over selection: with it on, dragging does
+	// not select text, and copying a log line is the single most common thing
+	// anyone does with one. Enabling that for everyone to deliver click-to-focus
+	// is the wrong trade, so it is opt-in in the GUI config and there is no key
+	// for it: Bubble Tea negotiates the mode with the terminal at startup and
+	// cannot renegotiate from inside the program.
+	mouseEnabled bool
+
 	// Time window over the loaded records. Zero means no limit, which is the
 	// default: the panel shows what the file holds until asked otherwise.
 	//
@@ -760,6 +776,12 @@ func (m *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
+
+	case tea.MouseMsg:
+		if !m.mouseEnabled {
+			break
+		}
+		return m.handleMouse(msg)
 
 	case scanMsg:
 		if msg.version != m.scanVersion {
@@ -1890,6 +1912,268 @@ func recordSeverity(record protocol.StoredRecord) severity {
 		}
 	}
 	return detectSeverity(record.Line)
+}
+
+// panelGeometry is where each panel sits on screen, in terminal cells.
+//
+// Row 0 is the header and the last row is the status bar; panels start at row 1
+// in both layouts. The mouse hit test and the renderer both derive from this,
+// because a hit test that works out the geometry a second time is a hit test
+// that will eventually disagree with what is on screen.
+type panelGeometry struct {
+	agentsX, agentsY, agentsW, agentsH int
+	filesX, filesY, filesW, filesH     int
+	mainX, mainY, mainW, mainH         int
+}
+
+func (m *model) geometry() panelGeometry {
+	lay := m.computeLayout()
+	// One row down for the header. The status bar is below the panels and never
+	// overlaps one, because the panels total height-2 rows.
+	const headerRows = 1
+
+	if lay.stacked {
+		return panelGeometry{
+			agentsX: 0, agentsY: headerRows, agentsW: lay.sidebarW, agentsH: lay.agentsH,
+			filesX: 0, filesY: headerRows + lay.agentsH, filesW: lay.sidebarW, filesH: lay.filesH,
+			mainX: 0, mainY: headerRows + lay.agentsH + lay.filesH, mainW: lay.mainW, mainH: lay.mainH,
+		}
+	}
+	return panelGeometry{
+		agentsX: 0, agentsY: headerRows, agentsW: lay.sidebarW, agentsH: lay.agentsH,
+		filesX: 0, filesY: headerRows + lay.agentsH, filesW: lay.sidebarW, filesH: lay.filesH,
+		mainX: lay.sidebarW + separatorWidth, mainY: headerRows, mainW: lay.mainW, mainH: lay.mainH,
+	}
+}
+
+// contains reports whether a cell is inside this rectangle, and the row relative
+// to its top.
+func (r panelRect) contains(x, y int) (int, bool) {
+	if y < r.y || y >= r.y+r.height || x < r.x || x >= r.x+r.width {
+		return 0, false
+	}
+	return y - r.y, true
+}
+
+type panelRect struct{ x, y, width, height int }
+
+// hitTest maps a terminal cell to the panel under it, the row within it, and the
+// geometry it measured against.
+//
+// The header and the status bar deliberately return false: clicking the version
+// string is not a request to focus a panel, and treating it as one would move
+// the cursor every time someone clicked near the top of the window.
+//
+// The geometry comes back out because the caller sets focus before acting on
+// the row, and in the stacked layout focus changes the geometry. Returning only
+// the row leaves the caller measuring it against a layout that has since
+// changed, which selects the wrong record by however much the stack moved. At
+// 80x80 focusing the logs moves the log panel from row 61 to row 17.
+func (m *model) hitTest(x, y int) (focusPane, int, panelGeometry, bool) {
+	g := m.geometry()
+	if y < 1 || y >= m.height-1 {
+		return 0, 0, g, false
+	}
+
+	rects := []struct {
+		pane focusPane
+		rect panelRect
+	}{
+		{focusAgents, panelRect{g.agentsX, g.agentsY, g.agentsW, g.agentsH}},
+		{focusFiles, panelRect{g.filesX, g.filesY, g.filesW, g.filesH}},
+		{focusMain, panelRect{g.mainX, g.mainY, g.mainW, g.mainH}},
+	}
+	for _, entry := range rects {
+		if row, ok := entry.rect.contains(x, y); ok {
+			return entry.pane, row, g, true
+		}
+	}
+	return 0, 0, g, false
+}
+
+// panelTopBorder is the number of rows above a panel's first body row: the top
+// border, which carries the title. Zero for a frameless panel.
+//
+// Distinct from panelChromeV, which is the total border cost, top and bottom.
+// The bottom border is below the content and the top one is above it, so the two
+// are used in opposite directions and confusing them puts a click one row off,
+// which selects a neighbouring entry and makes the hit test look arbitrary
+// rather than wrong by one.
+func (m *model) panelTopBorder() int {
+	if !m.framed() {
+		return 0
+	}
+	return 1
+}
+
+// listRowIndex converts a row within a list panel to an index into that panel's
+// items, or -1 when the row is chrome or past the last item.
+//
+// rowBudget is the panel's own content budget rather than the item count,
+// because windowAround scrolls by it. A different budget here would select a
+// different item from the one drawn on the row that was clicked.
+func (m *model) listRowIndex(pane focusPane, row, rowBudget int) (index, start int) {
+	items := len(m.sortedAgentIDs())
+	cursorIndex := m.agentIndex
+	if pane == focusFiles {
+		items = len(m.treeFlattened)
+		cursorIndex = m.treeIndex
+	}
+	start, _ = windowAround(items, cursorIndex, max(1, rowBudget))
+
+	content := row - m.panelTopBorder()
+	if content < 0 {
+		return -1, start
+	}
+	index = start + content
+	if index >= items {
+		return -1, start
+	}
+	return index, start
+}
+
+// recordAtRow returns the index into the filtered set of the record drawn on a
+// given row of the log panel, or -1 if that row is not a record.
+//
+// It walks the same window and the same wrapping renderMain does. The agreement
+// between the two is asserted by TestMouseHitTestAgreesWithTheRenderer rather
+// than assumed, because the alternative is a click that selects the wrong log
+// line as soon as wrapping is involved.
+func (m *model) recordAtRow(row, innerWidth, budget int) int {
+	records := m.filtered()
+	if len(records) == 0 {
+		return -1
+	}
+	gutterOf := func(i int) (string, int) {
+		gutter := m.recordGutter(records[i], i == m.lineIndex, innerWidth)
+		return gutter, max(1, innerWidth-lipgloss.Width(gutter))
+	}
+	start, end := m.windowRecords(records, max(1, budget), innerWidth, gutterOf)
+
+	offset := 0
+	for i := start; i < end; i++ {
+		_, bodyWidth := gutterOf(i)
+		size := len(m.recordRows(records[i], bodyWidth))
+		if row < offset+size {
+			return i
+		}
+		offset += size
+	}
+	return -1
+}
+
+// handleMouse routes a mouse event.
+//
+// The wheel scrolls the panel under the pointer rather than the focused one,
+// and does not move focus. Scroll is not a navigation gesture: an operator
+// scrolling a long log to find something should not find their cursor has moved
+// to another panel halfway down, and a terminal where the wheel does nothing at
+// all is worse than one where it does something slightly unexpected.
+func (m *model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	switch msg.Button {
+	case tea.MouseButtonWheelUp:
+		m.moveCursor(paneAtOrFocused(m, msg.X, msg.Y), -1)
+		return m, nil
+	case tea.MouseButtonWheelDown:
+		m.moveCursor(paneAtOrFocused(m, msg.X, msg.Y), 1)
+		return m, nil
+	case tea.MouseButtonLeft:
+		// Release is ignored on purpose: acting on it too would double every
+		// click, and a press-drag-release that ended outside the panel would
+		// still select.
+		if msg.Action == tea.MouseActionPress {
+			if pane, row, g, ok := m.hitTest(msg.X, msg.Y); ok {
+				m.focus = pane
+				m.selectRow(pane, row, g)
+			}
+		}
+		return m, nil
+	}
+	return m, nil
+}
+
+// paneAtOrFocused is the panel under the pointer, or the focused one when the
+// pointer is on the header or the status bar.
+func paneAtOrFocused(m *model, x, y int) focusPane {
+	if pane, _, _, ok := m.hitTest(x, y); ok {
+		return pane
+	}
+	return m.focus
+}
+
+// selectRow moves a panel's cursor to the row that was clicked.
+//
+// row is relative to the panel's top, so the top border comes off first. A row
+// that lands on the graph or the file header selects nothing: those are
+// decoration, not list entries, and selecting something for them would mean a
+// click near the top of the panel moved the cursor unpredictably.
+func (m *model) selectRow(pane focusPane, row int, g panelGeometry) {
+	switch pane {
+	case focusAgents:
+		if index, _ := m.listRowIndex(pane, row, g.agentsH-m.panelChromeV()); index >= 0 {
+			m.agentIndex = index
+		}
+	case focusFiles:
+		if index, _ := m.listRowIndex(pane, row, g.filesH-m.panelChromeV()); index >= 0 {
+			m.treeIndex = index
+		}
+	case focusMain:
+		content := row - m.panelTopBorder()
+		header := m.logHeaderRows(g.mainH)
+		if content < header {
+			return
+		}
+		budget := g.mainH - m.panelChromeV() - header
+		if index := m.recordAtRow(content-header, m.bodyWidth(g.mainW), budget); index >= 0 {
+			m.lineIndex = index
+		}
+	}
+}
+
+// moveCursor steps a panel's cursor by delta, honouring that panel's own bounds
+// and leaving focus where it was.
+//
+// moveUp and moveDown act on m.focus, so the target pane is borrowed for the
+// duration. Scrolling a panel that is not focused should move that panel's
+// cursor, not silently promote it to the focused one.
+func (m *model) moveCursor(pane focusPane, delta int) {
+	saved := m.focus
+	m.focus = pane
+	if delta < 0 {
+		for range -delta {
+			m.moveUp()
+		}
+	} else {
+		for range delta {
+			m.moveDown()
+		}
+	}
+	m.focus = saved
+}
+
+// logHeaderRows is how many rows renderMain spends above the records: the file
+// path line, the optional category line, the divider, and the graph block.
+//
+// It is derived rather than hard-coded because getting it wrong does not crash.
+// A click simply selects the wrong log line, which is exactly the kind of bug
+// that survives a casual look, so TestMouseHitTestAgreesWithTheRenderer checks
+// it against the rendered frame instead.
+func (m *model) logHeaderRows(panelHeight int) int {
+	// Same order as renderMain, and the same arguments: graphVisible takes the
+	// log panel's height, not the terminal's, because that is what decides
+	// whether the graph fits at all.
+	rows := 0
+	if m.graphVisible(panelHeight) {
+		rows += graphSeriesRows
+	}
+	if len(m.files) > 0 {
+		rows++ // file path
+		if len(m.categories) > 0 && m.categories[m.categoryIndex] != "all" {
+			rows++
+		}
+		rows++ // divider
+	}
+	return rows
 }
 
 // graphGlyphs maps a bucket onto one column, indexed by level.
