@@ -85,6 +85,18 @@ nfpms:
     formats:
       - deb
       - rpm
+    # GoReleaser's default is
+    #   {{ .PackageName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    # which puts the version before the platform and so disagrees with the
+    # archive names, where name_template puts it last. v0.1.1 shipped as
+    # logmon-agent_linux_amd64_0.1.1.tar.gz alongside
+    # logmon-agent_0.1.1_linux_amd64.deb for the same binary.
+    #
+    # package_name is deliberately left as logmon-agent rather than
+    # logmon-agent_linux_amd64: it is the filename stem here, but it is also
+    # what the package installs as under bindir, and that is the name a user
+    # types. Only the asset filename changes.
+    name_template: "{{ .PackageName }}_{{ .Os }}_{{ .Arch }}_{{ .Version }}"
     # `bindir` is a single string, and already defaults to /usr/bin.
     bindir: /usr/bin
     # No `contents`. GoReleaser adds the binaries itself, and it installs
@@ -105,6 +117,7 @@ nfpms:
     formats:
       - deb
       - rpm
+    name_template: "{{ .PackageName }}_{{ .Os }}_{{ .Arch }}_{{ .Version }}"
     bindir: /usr/bin
 
 checksum:
@@ -135,3 +148,23 @@ changelog:
 release:
   draft: false
   prerelease: auto
+  # The raw executables, as assets in their own right.
+  #
+  # GoReleaser already builds them into dist/, but only uploads archives and
+  # packages. A user who wanted one binary had to unpack a tarball first, which
+  # is the wrong shape for scp-ing logmon-server onto a box that does not speak
+  # dpkg.
+  #
+  # Additive on purpose: nothing existing is renamed or removed, so if
+  # extra_files turns out to misbehave the release still ships its archives and
+  # packages. Four more assets and roughly 10 MB of bytes that are also inside
+  # the tarballs, which is the trade for not making anyone unpack anything.
+  #
+  # The globs are per build id. A single ./dist/logmon-* glob would match both
+  # binaries under both name_templates and produce four copies of each, so the
+  # two entries stay separate.
+  extra_files:
+    - glob: ./dist/logmon-agent_*
+      name_template: "logmon-agent_{{ .Os }}_{{ .Arch }}"
+    - glob: ./dist/logmon-server_*
+      name_template: "logmon-server_{{ .Os }}_{{ .Arch }}"
