@@ -33,24 +33,57 @@ const (
 	breakpointWide   = 140
 	breakpointMedium = 100
 	minTTYWidth      = 40
-	minTTYHeight     = 10
+	minTTYHeight     = 14
 	sidebarMinWidth  = 30
-	stackedSidebarH  = 10
 	sidebarMinHeight = 4
-	mainMinWidth     = 20
-	separatorWidth   = 2
+	// The narrow layout stacks three bordered panels -- agents, files, logs --
+	// plus the header and the status bar. Each panel costs two border rows and
+	// wants at least one of content, so the floor is 3*3 + 2 = 11. Fourteen
+	// leaves the log panel four usable rows at the smallest supported size.
+	mainMinWidth   = 20
+	separatorWidth = 2
 
 	// statusBarStyle pads one column each side.
 	statusBarPadding = 2
 )
 
+// panelMinRows is the smallest a bordered panel can be and still show a
+// title: two border rows and one of content.
+const panelMinRows = 3
+
 // layout describes panel geometry for one frame.
+//
+// The sidebar is two panels, not one: agents on top, the file tree below. They
+// scroll independently and take focus independently, so they get their own row
+// budgets rather than sharing one.
 type layout struct {
 	stacked  bool
 	sidebarW int
-	sidebarH int
+	agentsH  int
+	filesH   int
 	mainW    int
 	mainH    int
+}
+
+// splitSidebar divides the sidebar height between the agents panel and the file
+// tree.
+//
+// The agents panel grows to fit its own rows, capped at half the sidebar so the
+// file tree is never squeezed out by a long agent list. Both keep the minimum
+// rows needed to render a title at all.
+func splitSidebar(sidebarH, agentCount int) (agentsH, filesH int) {
+	if sidebarH < panelMinRows*2 {
+		sidebarH = panelMinRows * 2
+	}
+	agentsH = min(2+agentCount+1, max(panelMinRows, sidebarH/2))
+	if agentsH < panelMinRows {
+		agentsH = panelMinRows
+	}
+	filesH = sidebarH - agentsH
+	if filesH < panelMinRows {
+		filesH = panelMinRows
+	}
+	return agentsH, filesH
 }
 
 func (m *model) computeLayout() layout {
@@ -79,10 +112,12 @@ func (m *model) computeLayout() layout {
 		if sw < 1 {
 			sw = 1
 		}
+		agentsH, filesH := splitSidebar(availH, len(m.agents))
 		return layout{
 			stacked:  false,
 			sidebarW: sw,
-			sidebarH: availH,
+			agentsH:  agentsH,
+			filesH:   filesH,
 			mainW:    w - sw - separatorWidth,
 			mainH:    availH,
 		}
@@ -95,17 +130,24 @@ func (m *model) computeLayout() layout {
 		return side(32)
 	}
 
-	// Narrow: stack the sidebar above the logs, giving each a share of the
-	// available height so neither panel is squeezed out on short terminals.
-	sh := min(stackedSidebarH, availH/2)
-	sh = max(sh, sidebarMinHeight)
-	if sh > availH-sidebarMinHeight {
-		sh = availH - sidebarMinHeight
+	// Narrow: all three panels stack, and the logs get at least half the
+	// available height.
+	//
+	// Reserving for the logs first, rather than splitting the sidebar and
+	// handing the remainder down, is what keeps the log panel readable. At
+	// 80x18 the sidebar-first split left the logs three rows: two of border
+	// and one holding the file header, so no log line was visible at all.
+	mainH := max(panelMinRows*2, availH/2)
+	agentsH, filesH := splitSidebar(availH-mainH, len(m.agents))
+	if agentsH+filesH+mainH > availH {
+		// splitSidebar enforces a floor on both sidebar panels, which can
+		// exceed the space available. The logs give up the difference.
+		overflow := agentsH + filesH + mainH - availH
+		if overflow < mainH {
+			mainH -= overflow
+		}
 	}
-	if sh < 1 {
-		sh = 1
-	}
-	return layout{stacked: true, sidebarW: w, sidebarH: sh, mainW: w, mainH: availH - sh}
+	return layout{stacked: true, sidebarW: w, agentsH: agentsH, filesH: filesH, mainW: w, mainH: mainH}
 }
 
 type logFile struct {
@@ -145,9 +187,13 @@ type agentMsg agentStatus
 
 type focusPane int
 
+// Three panes, because the sidebar is two panels. Tab advances modulo the
+// count; `1 - m.focus` only ever worked with two.
 const (
-	focusSidebar focusPane = iota
+	focusAgents focusPane = iota
+	focusFiles
 	focusMain
+	paneCount
 )
 
 type model struct {
@@ -168,8 +214,12 @@ type model struct {
 	err           error
 
 	// new TUI state
-	focus         focusPane
-	sidebarIndex  int
+	focus focusPane
+	// One cursor per sidebar panel. They were a single unified index once, with
+	// agents occupying the first len(agents) slots, which meant the two panels
+	// could never scroll independently.
+	agentIndex    int
+	treeIndex     int
 	fileTree      *fileNode
 	treeFlattened []*fileNode
 	filter        string
@@ -189,7 +239,7 @@ func newModel(dataDir string) *model {
 		dataDir:     dataDir,
 		categories:  []string{"all"},
 		agents:      make(map[string]agentStatus),
-		focus:       focusSidebar,
+		focus:       focusAgents,
 		p:           defaultPalette,
 		borderStyle: lipgloss.RoundedBorder(),
 	}
@@ -375,7 +425,9 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "tab":
-		m.focus = 1 - m.focus
+		// Modulo the pane count, not `1 - m.focus`: that arithmetic only ever worked
+		// with two panes and would never reach the logs from the agents panel.
+		m.focus = (m.focus + 1) % paneCount
 		return m, nil
 
 	case "up", "k":
@@ -460,9 +512,13 @@ func (m *model) applyFilter() {
 
 func (m *model) moveUp() (tea.Model, tea.Cmd) {
 	switch m.focus {
-	case focusSidebar:
-		if m.sidebarIndex > 0 {
-			m.sidebarIndex--
+	case focusAgents:
+		if m.agentIndex > 0 {
+			m.agentIndex--
+		}
+	case focusFiles:
+		if m.treeIndex > 0 {
+			m.treeIndex--
 		}
 	case focusMain:
 		if m.lineIndex > 0 {
@@ -474,10 +530,13 @@ func (m *model) moveUp() (tea.Model, tea.Cmd) {
 
 func (m *model) moveDown() (tea.Model, tea.Cmd) {
 	switch m.focus {
-	case focusSidebar:
-		maxIdx := m.getSidebarMaxIndex()
-		if m.sidebarIndex < maxIdx {
-			m.sidebarIndex++
+	case focusAgents:
+		if m.agentIndex < m.getAgentMaxIndex() {
+			m.agentIndex++
+		}
+	case focusFiles:
+		if m.treeIndex < m.getFileMaxIndex() {
+			m.treeIndex++
 		}
 	case focusMain:
 		if m.lineIndex+1 < len(m.filtered()) {
@@ -488,23 +547,24 @@ func (m *model) moveDown() (tea.Model, tea.Cmd) {
 }
 
 func (m *model) moveLeft() (tea.Model, tea.Cmd) {
+	// From the logs, step back to the file tree rather than jumping past it.
 	if m.focus == focusMain {
-		m.focus = focusSidebar
+		m.focus = focusFiles
 		return m, nil
 	}
-	// collapse folder under cursor if it's a tree node
-	agentCount := len(m.agents)
-	if m.sidebarIndex >= agentCount && len(m.treeFlattened) > 0 {
-		treeIdx := m.sidebarIndex - agentCount
-		if treeIdx < len(m.treeFlattened) {
-			node := m.treeFlattened[treeIdx]
-			if node.Expanded && len(node.Children) > 0 {
-				node.Expanded = false
-				m.flattenTree()
-				// clamp sidebarIndex if it went out of bounds after collapse
-				if m.sidebarIndex > m.getSidebarMaxIndex() {
-					m.sidebarIndex = m.getSidebarMaxIndex()
-				}
+	// Only the tree has expandable nodes. On the agents panel this is a no-op
+	// rather than a focus change, so left and right stay predictable.
+	if m.focus != focusFiles || len(m.treeFlattened) == 0 {
+		return m, nil
+	}
+	if m.treeIndex < len(m.treeFlattened) {
+		node := m.treeFlattened[m.treeIndex]
+		if node.Expanded && len(node.Children) > 0 {
+			node.Expanded = false
+			m.flattenTree()
+			// clamp the cursor: collapsing can pull the node under it away
+			if m.treeIndex > m.getFileMaxIndex() {
+				m.treeIndex = m.getFileMaxIndex()
 			}
 		}
 	}
@@ -512,49 +572,41 @@ func (m *model) moveLeft() (tea.Model, tea.Cmd) {
 }
 
 func (m *model) moveRight() (tea.Model, tea.Cmd) {
-	if m.focus == focusSidebar {
-		m.focus = focusMain
+	if m.focus == focusAgents {
+		m.focus = focusFiles
 		return m, nil
 	}
-	// expand folder under cursor if it's a tree node
-	agentCount := len(m.agents)
-	if m.sidebarIndex >= agentCount && len(m.treeFlattened) > 0 {
-		treeIdx := m.sidebarIndex - agentCount
-		if treeIdx < len(m.treeFlattened) {
-			node := m.treeFlattened[treeIdx]
-			if !node.Expanded && len(node.Children) > 0 {
-				node.Expanded = true
-				m.flattenTree()
-			}
+	if m.focus != focusFiles || len(m.treeFlattened) == 0 {
+		return m, nil
+	}
+	if m.treeIndex < len(m.treeFlattened) {
+		node := m.treeFlattened[m.treeIndex]
+		if !node.Expanded && len(node.Children) > 0 {
+			node.Expanded = true
+			m.flattenTree()
 		}
 	}
 	return m, nil
 }
 
 func (m *model) handleEnter() (tea.Model, tea.Cmd) {
-	if m.focus != focusSidebar {
-		return m, nil
-	}
-	agentCount := len(m.agents)
-
-	// if on an agent row
-	if m.sidebarIndex < agentCount {
-		agentIDs := make([]string, 0, len(m.agents))
-		for id := range m.agents {
-			agentIDs = append(agentIDs, id)
-		}
-		sort.Strings(agentIDs)
-		if m.sidebarIndex < len(agentIDs) {
-			m.agentFilter = agentIDs[m.sidebarIndex]
+	switch m.focus {
+	case focusAgents:
+		agentIDs := m.sortedAgentIDs()
+		if m.agentIndex < len(agentIDs) {
+			m.agentFilter = agentIDs[m.agentIndex]
 			m.lineIndex = 0
 		}
 		return m, nil
+
+	case focusFiles:
+		// handled below
+	default:
+		return m, nil
 	}
 
-	// if on a tree node
-	treeIdx := m.sidebarIndex - agentCount
-	if treeIdx >= 0 && treeIdx < len(m.treeFlattened) {
-		node := m.treeFlattened[treeIdx]
+	if m.treeIndex < len(m.treeFlattened) {
+		node := m.treeFlattened[m.treeIndex]
 		if node.IsFile {
 			for i, f := range m.files {
 				if f.Path == node.Path {
@@ -570,10 +622,24 @@ func (m *model) handleEnter() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *model) getSidebarMaxIndex() int {
-	agentCount := len(m.agents)
-	treeCount := len(m.treeFlattened)
-	return max(0, agentCount+treeCount-1)
+// sortedAgentIDs lists agent IDs in a stable order. The agents map has no
+// order of its own, and both the cursor and the row rendering need the same
+// one or the highlight drifts between frames.
+func (m *model) sortedAgentIDs() []string {
+	ids := make([]string, 0, len(m.agents))
+	for id := range m.agents {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func (m *model) getAgentMaxIndex() int {
+	return max(0, len(m.agents)-1)
+}
+
+func (m *model) getFileMaxIndex() int {
+	return max(0, len(m.treeFlattened)-1)
 }
 
 func (m *model) buildFileTree() {
@@ -666,12 +732,17 @@ func (m *model) View() string {
 	// Status bar (minimal on narrow terminals)
 	statusBar := m.renderStatusBar(lay.stacked)
 
-	sidebar := m.renderSidebar(lay.sidebarW, lay.sidebarH)
+	// The sidebar is two panels stacked against each other, borders touching,
+	// which is how the reference layout reads: the gap between two panels
+	// costs rows that the log panel needs more.
+	agents := m.renderAgents(lay.sidebarW, lay.agentsH)
+	files := m.renderFiles(lay.sidebarW, lay.filesH)
+	sidebar := lipgloss.JoinVertical(lipgloss.Left, agents, files)
 	main := m.renderMain(lay.mainW, lay.mainH)
 
 	var content string
 	if lay.stacked {
-		content = lipgloss.JoinVertical(lipgloss.Left, sidebar, main)
+		content = lipgloss.JoinVertical(lipgloss.Left, agents, files, main)
 	} else {
 		content = lipgloss.JoinHorizontal(lipgloss.Top, sidebar, "  ", main)
 	}
@@ -873,145 +944,96 @@ func corner(s string) string {
 	return " "
 }
 
-func (m *model) renderSidebar(width, height int) string {
+// windowAround returns the half-open slice of rows to draw so the cursor stays
+// visible in a panel shorter than its contents.
+func windowAround(rows int, cursor, budget int) (int, int) {
+	if budget < 1 {
+		budget = 1
+	}
+	if rows <= budget {
+		return 0, rows
+	}
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor >= rows {
+		cursor = rows - 1
+	}
+	start := cursor - budget/2
+	start = max(start, 0)
+	start = min(start, rows-budget)
+	return start, start + budget
+}
+
+// renderAgents draws the agents panel: one row per agent, its connection state
+// and hostname.
+func (m *model) renderAgents(width, height int) string {
 	st := m.p.styles()
+	innerWidth := max(1, width-textWidth)
+	rowBudget := max(1, height-chromeHeight)
 
-	innerWidth := width - textWidth
-	if innerWidth < 1 {
-		innerWidth = 1
+	ids := m.sortedAgentIDs()
+	start, end := windowAround(len(ids), m.agentIndex, rowBudget)
+
+	lines := make([]string, 0, rowBudget)
+	if len(ids) == 0 {
+		lines = append(lines, "  (none \u2014 start an agent)")
 	}
-
-	agentIDs := make([]string, 0, len(m.agents))
-	for id := range m.agents {
-		agentIDs = append(agentIDs, id)
-	}
-	sort.Strings(agentIDs)
-
-	agentCount := len(agentIDs)
-
-	type sidebarRow struct {
-		text     string
-		selected bool
-	}
-
-	// Collect selectable rows (agents first, then tree nodes) so the
-	// cursor index maps 1:1 and the visible window can follow it.
-	agentRows := make([]sidebarRow, 0, agentCount)
-	for i, id := range agentIDs {
-		agent := m.agents[id]
-		state := "●"
-		stateStyle := st.connected
+	for i := start; i < end; i++ {
+		agent := m.agents[ids[i]]
+		state, stateStyle := "\u25cf", st.connected
 		if !agent.Connected {
-			state = "○"
-			stateStyle = st.offline
+			state, stateStyle = "\u25cb", st.offline
 		}
 		plain := fmt.Sprintf("%s %s %s", state, agent.ID, safeText(agent.Hostname))
-		var line string
-		if m.focus == focusSidebar && i == m.sidebarIndex {
-			line = st.selected.Width(innerWidth).Render(truncateText(plain, innerWidth))
-		} else {
-			line = stateStyle.Render(state) + " " + truncateText(
-				fmt.Sprintf("%s %s", agent.ID, safeText(agent.Hostname)), innerWidth-2)
+		if m.focus == focusAgents && i == m.agentIndex {
+			lines = append(lines, st.selected.Width(innerWidth).Render(truncateText(plain, innerWidth)))
+			continue
 		}
-		agentRows = append(agentRows, sidebarRow{text: line, selected: m.focus == focusSidebar && i == m.sidebarIndex})
+		lines = append(lines, stateStyle.Render(state)+" "+truncateText(
+			fmt.Sprintf("%s %s", agent.ID, safeText(agent.Hostname)), max(1, innerWidth-2)))
 	}
 
-	treeRows := make([]sidebarRow, 0, len(m.treeFlattened))
-	for i, node := range m.treeFlattened {
-		unifiedIdx := agentCount + i
+	return panel("Agents", strings.Join(lines, "\n"), width, height, m.borderStyle, m.focus == focusAgents, m.p)
+}
+
+// renderFiles draws the file tree panel: dates, apps and agents, as stored on
+// disk.
+func (m *model) renderFiles(width, height int) string {
+	st := m.p.styles()
+	innerWidth := max(1, width-textWidth)
+	rowBudget := max(1, height-chromeHeight)
+
+	start, end := windowAround(len(m.treeFlattened), m.treeIndex, rowBudget)
+
+	lines := make([]string, 0, rowBudget)
+	if len(m.treeFlattened) == 0 {
+		lines = append(lines, "  (no logs)")
+	}
+	for i := start; i < end; i++ {
+		node := m.treeFlattened[i]
 		indent := strings.Repeat("  ", nodeDepth(node))
 		prefix := "  "
 		if len(node.Children) > 0 {
-			if node.Expanded {
-				prefix = "▼ "
-			} else {
-				prefix = "▶ "
+			prefix = "\u25bc " // down triangle
+			if !node.Expanded {
+				prefix = "\u25b6 " // right triangle
 			}
 		}
 		name := node.Name
 		if node.IsFile {
-			name = "● " + name
+			name = "\u25cf " + name
 		}
 		line := indent + prefix + name
-		if m.focus == focusSidebar && unifiedIdx == m.sidebarIndex {
+		if m.focus == focusFiles && i == m.treeIndex {
 			line = st.selected.Width(innerWidth).Render(truncateText(line, innerWidth))
 		} else {
 			line = truncateText(line, innerWidth)
 		}
-		treeRows = append(treeRows, sidebarRow{text: line, selected: m.focus == focusSidebar && unifiedIdx == m.sidebarIndex})
+		lines = append(lines, line)
 	}
 
-	// Window selectable rows around the cursor so short panels scroll
-	// instead of overflowing. Both section titles are always drawn.
-	selectable := append(agentRows, treeRows...)
-	rowBudget := height - chromeHeight - 2 // border + Agents/Files titles
-	if rowBudget < 1 {
-		rowBudget = 1
-	}
-	start := 0
-	if len(selectable) > rowBudget {
-		cursor := m.sidebarIndex
-		if cursor < 0 {
-			cursor = 0
-		}
-		if cursor >= len(selectable) {
-			cursor = len(selectable) - 1
-		}
-		start = cursor - rowBudget/2
-		if start < 0 {
-			start = 0
-		}
-		if start+rowBudget > len(selectable) {
-			start = len(selectable) - rowBudget
-		}
-	}
-	end := start + rowBudget
-	if end > len(selectable) {
-		end = len(selectable)
-	}
-
-	// Split visible rows back into agent/tree sections for titles.
-	var visibleAgents, visibleTree []sidebarRow
-	if start < agentCount {
-		agentEnd := end
-		if agentEnd > agentCount {
-			agentEnd = agentCount
-		}
-		visibleAgents = selectable[start:agentEnd]
-	}
-	treeStart := start - agentCount
-	if treeStart < 0 {
-		treeStart = 0
-	}
-	treeEnd := end - agentCount
-	if treeEnd > len(treeRows) {
-		treeEnd = len(treeRows)
-	}
-	if treeEnd > treeStart {
-		visibleTree = treeRows[treeStart:treeEnd]
-	}
-
-	// Lines are joined without a trailing newline: a trailing "\n" would add
-	// a phantom row that Height() cannot shrink, pushing the status bar off.
-	lines := make([]string, 0, rowBudget+2)
-	lines = append(lines, st.sectionTitle.Render(" Agents "))
-	if agentCount == 0 {
-		lines = append(lines, "  (none — start an agent)")
-	} else {
-		for _, row := range visibleAgents {
-			lines = append(lines, row.text)
-		}
-	}
-	lines = append(lines, st.sectionTitle.Render(" Files "))
-	if len(m.treeFlattened) == 0 {
-		lines = append(lines, "  (no logs)")
-	} else {
-		for _, row := range visibleTree {
-			lines = append(lines, row.text)
-		}
-	}
-
-	return panel("Sources", strings.Join(lines, "\n"), width, height, m.borderStyle, m.focus == focusSidebar, m.p)
+	return panel("Files", strings.Join(lines, "\n"), width, height, m.borderStyle, m.focus == focusFiles, m.p)
 }
 
 func nodeDepth(node *fileNode) int {
@@ -1121,11 +1143,11 @@ type keybinding struct {
 var keybindings = []keybinding{
 	{"q, ctrl+c", "quit"},
 	{"?", "toggle this help"},
-	{"tab", "switch focus between panels"},
+	{"tab", "cycle focus: agents, files, logs"},
 	{"up, k", "move up"},
 	{"down, j", "move down"},
-	{"left, h", "collapse a node, or move focus"},
-	{"right, l", "expand a node, or move focus"},
+	{"left, h", "collapse a node, or step back to the files"},
+	{"right, l", "expand a node, or step on to the logs"},
 	{"enter", "open a node, or filter by the selected agent"},
 	{"r", "rescan storage"},
 	{"/", "filter records"},
@@ -1170,7 +1192,7 @@ func helpRow(b keybinding, keyWidth int, st styles) string {
 func (m *model) renderStatusBar(minimal bool) string {
 	st := m.p.styles()
 	connected := connectedCount(m.agents)
-	focusStr := map[focusPane]string{focusSidebar: "Sidebar", focusMain: "Logs"}[m.focus]
+	focusStr := map[focusPane]string{focusAgents: "Agents", focusFiles: "Files", focusMain: "Logs"}[m.focus]
 
 	// Short hints on narrow terminals, minimal when stacked. Hints are
 	// dropped in order until the bar fits so it never wraps to a second

@@ -58,8 +58,10 @@ func TestPanelTitlesRendered(t *testing.T) {
 		m := testModel(t, size[0], size[1])
 		view := m.View()
 
-		if !strings.Contains(view, "Sources") {
-			t.Errorf("%dx%d: side panel has no title:\n%s", size[0], size[1], view)
+		for _, want := range []string{"Agents", "Files"} {
+			if !strings.Contains(view, want) {
+				t.Errorf("%dx%d: no %q panel title:\n%s", size[0], size[1], want, view)
+			}
 		}
 		if !strings.Contains(view, "Logs") {
 			t.Errorf("%dx%d: log panel has no title:\n%s", size[0], size[1], view)
@@ -80,9 +82,15 @@ func TestPanelTitlesRendered(t *testing.T) {
 // Width alone would not catch it, since lipgloss pads the block out again.
 func TestPanelFrameAligns(t *testing.T) {
 	m := testModel(t, 100, 20)
-	for _, line := range strings.Split(m.renderSidebar(30, 10), "\n") {
+	agentsH, filesH := splitSidebar(18, len(m.agents))
+	for _, line := range strings.Split(m.renderAgents(30, agentsH), "\n") {
 		if w := lipglossWidth(line); w != 30 {
-			t.Errorf("sidebar row width = %d, want 30: %q", w, line)
+			t.Errorf("agents row width = %d, want 30: %q", w, line)
+		}
+	}
+	for _, line := range strings.Split(m.renderFiles(30, filesH), "\n") {
+		if w := lipglossWidth(line); w != 30 {
+			t.Errorf("files row width = %d, want 30: %q", w, line)
 		}
 	}
 	for _, line := range strings.Split(m.renderMain(68, 10), "\n") {
