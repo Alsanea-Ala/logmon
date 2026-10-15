@@ -228,7 +228,56 @@ type tickMsg time.Time
 
 type focusPane int
 
-// filterScope is which field of a record the text filter is matched against.
+// Log time window.
+//
+// `t` cycles these. The bindings `[` and `]` were taken by the category cycle
+// long before the window existed, and adding a modifier to one of them would
+// have meant a two-key chord for something as common as this.
+var logWindowOptions = []struct {
+	label string
+	d     time.Duration
+}{
+	{"5m", 5 * time.Minute},
+	{"1h", time.Hour},
+	{"24h", 24 * time.Hour},
+	{"all", 0},
+}
+
+// windowIndexAll is the default: no limit, the panel shows what the file holds
+// until the operator asks otherwise.
+const windowIndexAll = 3
+
+// clock is the model's time source, falling back to the wall clock so a model
+// built without newModel still behaves.
+func (m *model) clock() time.Time {
+	if m.now == nil {
+		return time.Now()
+	}
+	return m.now()
+}
+
+// window is the active limit, or zero for none.
+func (m *model) window() time.Duration {
+	if m.windowIndex < 0 || m.windowIndex >= len(logWindowOptions) {
+		return 0
+	}
+	return logWindowOptions[m.windowIndex].d
+}
+
+func (m *model) windowLabel() string {
+	if m.windowIndex < 0 || m.windowIndex >= len(logWindowOptions) {
+		return "all"
+	}
+	return logWindowOptions[m.windowIndex].label
+}
+
+// cycleWindow steps to the next limit and wraps back to no limit.
+func (m *model) cycleWindow() {
+	m.windowIndex = (m.windowIndex + 1) % len(logWindowOptions)
+	m.clampLine()
+}
+
+// textScope is which field of a record the text filter is matched against.
 type filterScope int
 
 const (
@@ -360,6 +409,19 @@ type model struct {
 	// wrap is off by default; see the wrapping constants.
 	wrap bool
 
+	// Time window over the loaded records. Zero means no limit, which is the
+	// default: the panel shows what the file holds until asked otherwise.
+	//
+	// This is a post-load predicate, not a load change. loadRecords reads the
+	// whole file either way, so a window saves no disk reads. What it saves is
+	// the operator reading a day of records when they wanted the last hour.
+	windowIndex int
+
+	// Clock seam. The time window makes filtered() a function of the current
+	// time, and the cache key has to move with it or records never age out.
+	// Without an injectable clock that staleness cannot be tested at all.
+	now func() time.Time
+
 	// filtered() runs on every View() to produce about twenty rows out of up
 	// to a thousand records, so its result is cached and invalidated by key.
 	// len(m.records) changes on every append and is nil after a load, which is
@@ -400,6 +462,11 @@ func newModel(dataDir string) *model {
 		p:            defaultPalette,
 		borderStyle:  lipgloss.RoundedBorder(),
 		graphEnabled: true,
+		// The zero value of windowIndex is the first option, which is 5m. The
+		// default has to be set explicitly or every session opens with a window
+		// the operator never asked for.
+		windowIndex: windowIndexAll,
+		now:         time.Now,
 	}
 }
 
@@ -668,6 +735,10 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "w":
 		m.wrap = !m.wrap
+		return m, nil
+
+	case "t":
+		m.cycleWindow()
 		return m, nil
 
 	case "/":
@@ -1301,7 +1372,7 @@ func (m *model) renderAgents(width, height int) string {
 // every record, so a stored duration is stale the moment it is computed, and
 // the graph of ages only gets more wrong the longer the session runs.
 func (m *model) agentRows(ids []string, innerWidth int) []string {
-	now := time.Now()
+	now := m.clock()
 	counts := m.agentRecordCounts()
 
 	// Widest value in each column, so the rows line up rather than ragged.
@@ -2067,6 +2138,7 @@ var keybindings = []keybinding{
 	{"[", "previous category"},
 	{"]", "next category"},
 	{"w", "toggle line wrapping"},
+	{"t", "cycle the log time window: 5m, 1h, 24h, all"},
 }
 
 // renderHelp draws the keybinding overlay at exactly w by h.
@@ -2126,8 +2198,8 @@ func (m *model) renderStatusBar(minimal bool) string {
 			"[/] filter", "[1/2/3] panel", "[r] refresh", "[?] help", "[q] quit", "[g] graph"}
 	}
 
-	counters := fmt.Sprintf("Agents: %d/%d   Files: %d   Focus: %s",
-		connected, len(m.agents), len(m.files), focusStr)
+	counters := fmt.Sprintf("Agents: %d/%d   Files: %d   Window: %s   Focus: %s",
+		connected, len(m.agents), len(m.files), m.windowLabel(), focusStr)
 
 	var bar string
 	switch {
@@ -2218,11 +2290,52 @@ func (m *model) filterKey() string {
 		category,
 		m.agentFilter,
 		strconv.Itoa(len(m.records)),
+		strconv.FormatInt(int64(m.window()), 10),
+		m.windowBucket(),
 	}, "\x00")
+}
+
+// windowBucket is a coarse clock reading that goes into the cache key.
+//
+// A time window makes the filtered result a function of the current time, and
+// without this the cache would be wrong in a way nothing else detects: records
+// would never age out, because the key would not change when the cutoff moves.
+//
+// Quartering the window bounds the staleness to a quarter of it and costs one
+// recomputation per interval rather than one per frame.
+//
+// The bucket alone is not enough to key on, and this is a collision that only
+// shows on round timestamps: 12:00:00 truncates to itself at both a 75-second
+// and a 15-minute step, so a 5m window and a 1h window produce the same bucket
+// and switching between them would serve the other one's cached answer. The
+// duration itself is part of the key alongside this.
+func (m *model) windowBucket() string {
+	w := m.window()
+	if w <= 0 {
+		return ""
+	}
+	step := w / 4
+	if step < time.Second {
+		step = time.Second
+	}
+	return strconv.FormatInt(m.clock().Truncate(step).UnixNano(), 10)
 }
 
 func (m *model) computeFiltered() []protocol.StoredRecord {
 	filtered := m.records
+
+	// Time first: it is a single comparison per record and it removes the most,
+	// so everything after it works on a smaller set.
+	if w := m.window(); w > 0 {
+		cutoff := m.clock().Add(-w)
+		inWindow := make([]protocol.StoredRecord, 0, len(filtered))
+		for _, record := range filtered {
+			if record.ReceivedAt.After(cutoff) {
+				inWindow = append(inWindow, record)
+			}
+		}
+		filtered = inWindow
+	}
 
 	// filter by category
 	if len(m.categories) > 0 && m.categoryIndex > 0 {
@@ -2288,7 +2401,7 @@ func recordMatches(record protocol.StoredRecord, needle string, scope filterScop
 // filterActive reports whether anything is narrowing the panel, so the empty
 // state can say "nothing matched" rather than "nothing here".
 func (m *model) filterActive() bool {
-	return m.filter != "" || m.agentFilter != "" ||
+	return m.filter != "" || m.agentFilter != "" || m.window() > 0 ||
 		(len(m.categories) > 0 && m.categoryIndex > 0)
 }
 
