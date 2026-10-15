@@ -10,6 +10,13 @@ every release. Edit the header above by hand; edit nothing below the marker.
 -->
 
 <!-- git-cliff: end of header -->
+## [0.1.1] - 2026-10-15
+
+### Bug Fixes
+
+- *(ci)* Make release tag step idempotent on reruns
+- *(ci)* Push releases with a personal token
+
 ## [0.1.0] - 2026-10-03
 
 ### Features
