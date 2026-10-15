@@ -15,7 +15,7 @@ func TestEmitChunksFitProtocolFrame(t *testing.T) {
 	line := strings.Repeat("\x00", protocol.MaxLineSize*2+1)
 	records := make(chan protocol.Record, 3)
 	source := Source{Type: "file", App: "app", Category: "test"}
-	if err := emit(context.Background(), records, source, line, nil); err != nil {
+	if err := emit(context.Background(), records, source, line, "", nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -38,35 +38,35 @@ func TestEmitChunksFitProtocolFrame(t *testing.T) {
 
 func TestParseCommandLine(t *testing.T) {
 	t.Run("docker timestamp", func(t *testing.T) {
-		line, stamp, cursor, err := parseCommandLine("docker", "2026-09-13T10:20:30.123Z payment failed")
+		line, stamp, cursor, _, err := parseCommandLine("docker", "2026-09-13T10:20:30.123Z payment failed")
 		if err != nil || line != "payment failed" || cursor != "" || stamp == nil || stamp.Format(time.RFC3339Nano) != "2026-09-13T10:20:30.123Z" {
 			t.Fatalf("unexpected parse result: %q, %v, %q, %v", line, stamp, cursor, err)
 		}
 	})
 
 	t.Run("docker without timestamp", func(t *testing.T) {
-		line, stamp, _, err := parseCommandLine("docker", "plain line")
+		line, stamp, _, _, err := parseCommandLine("docker", "plain line")
 		if err != nil || line != "plain line" || stamp != nil {
 			t.Fatalf("unexpected parse result: %q, %v, %v", line, stamp, err)
 		}
 	})
 
 	t.Run("journal metadata", func(t *testing.T) {
-		line, stamp, cursor, err := parseCommandLine("journald", `{"MESSAGE":"started","__REALTIME_TIMESTAMP":"1000000","__CURSOR":"s=1"}`)
+		line, stamp, cursor, _, err := parseCommandLine("journald", `{"MESSAGE":"started","__REALTIME_TIMESTAMP":"1000000","__CURSOR":"s=1"}`)
 		if err != nil || line != "started" || cursor != "s=1" || stamp == nil || !stamp.Equal(time.Unix(1, 0).UTC()) {
 			t.Fatalf("unexpected parse result: %q, %v, %q, %v", line, stamp, cursor, err)
 		}
 	})
 
 	t.Run("journal binary message", func(t *testing.T) {
-		line, _, _, err := parseCommandLine("journald", `{"MESSAGE":[65,66]}`)
+		line, _, _, _, err := parseCommandLine("journald", `{"MESSAGE":[65,66]}`)
 		if err != nil || line != "[65,66]" {
 			t.Fatalf("unexpected parse result: %q, %v", line, err)
 		}
 	})
 
 	t.Run("malformed journal", func(t *testing.T) {
-		if _, _, _, err := parseCommandLine("journald", `{`); err == nil {
+		if _, _, _, _, err := parseCommandLine("journald", `{`); err == nil {
 			t.Fatal("expected malformed journal error")
 		}
 	})
@@ -75,13 +75,13 @@ func TestParseCommandLine(t *testing.T) {
 func TestEmitPreservesEmptyAndUTF8Lines(t *testing.T) {
 	source := Source{Type: "file", App: "app", Category: "test"}
 	empty := make(chan protocol.Record, 1)
-	if err := emit(context.Background(), empty, source, "", nil); err != nil || (<-empty).Line != "" {
+	if err := emit(context.Background(), empty, source, "", "", nil); err != nil || (<-empty).Line != "" {
 		t.Fatalf("empty line was not preserved: %v", err)
 	}
 
 	line := strings.Repeat("a", protocol.MaxLineSize-1) + "\u00e9x"
 	records := make(chan protocol.Record, 2)
-	if err := emit(context.Background(), records, source, line, nil); err != nil {
+	if err := emit(context.Background(), records, source, line, "", nil); err != nil {
 		t.Fatal(err)
 	}
 	first, second := <-records, <-records

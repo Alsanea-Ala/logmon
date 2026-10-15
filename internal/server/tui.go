@@ -1773,9 +1773,16 @@ func truncateText(s string, width int) string {
 
 // severity is the level a log line is drawn at.
 //
-// Derived from the text of the line, because nothing on the wire says what
-// level a record is: protocol.StoredRecord carries a Category string that the
-// agent configured, and that is a user-chosen label rather than a level.
+// Two sources, in order of authority.
+//
+// A record that states its level is coloured from that, and only that. The
+// source knows: journald assigned a syslog priority to the entry, and a line
+// reading "connection refused" was logged at err because something broke, not
+// because it happens to contain an alarming word.
+//
+// A record with no stated level falls back to scanning the text, which is what
+// every record was doing before the field existed. That is why this composes
+// with a year of existing JSONL rather than needing it rewritten.
 type severity int
 
 const (
@@ -1820,6 +1827,11 @@ var severityKeywords = []struct {
 // detectSeverity scans a log line for a level marker and returns the highest
 // one found.
 //
+// This is the fallback, used only for records whose source stated nothing. It
+// is a guess and it is wrong often enough to be worth naming: "no errors in the
+// last hour" is not an error, and a log line about the file /var/log/errors/ is
+// not either.
+//
 // Order matters and it is not alphabetical: a line reading "error: failed to
 // connect" must be an error, not a warning, so the highest level has to win
 // regardless of where in the line it appears.
@@ -1842,6 +1854,42 @@ func detectSeverity(line string) severity {
 		}
 	}
 	return severityPlain
+}
+
+// syslogPriorities maps journald's PRIORITY onto our four levels.
+//
+// Syslog has eight levels and the TUI shows four, so the collapse is lossy on
+// purpose: emerg, alert and crit all read as an error to an operator, and
+// anything finer would need a fifth colour to be visible anyway.
+//
+// Two spellings are accepted because journalctl emits the number but some
+// journal configurations emit the name. The number is what journald normally
+// produces; the name costs three lines and removes a class of "the level was
+// there and we ignored it" bug.
+var syslogPriorities = map[string]severity{
+	"0": severityError, "emerg": severityError,
+	"1": severityError, "alert": severityError,
+	"2": severityError, "crit": severityError,
+	"3": severityError, "err": severityError,
+	"4": severityWarn, "warning": severityWarn,
+	"5": severityInfo, "notice": severityInfo,
+	"6": severityInfo, "info": severityInfo,
+	"7": severityDebug, "debug": severityDebug,
+}
+
+// recordSeverity is a record's severity: what the source stated if it stated
+// something the server can read, otherwise a guess from the text.
+//
+// An unrecognised level falls back to the guess rather than rendering nothing.
+// A source stating something this version does not know about should not make
+// the line invisible, and a blank panel is a worse failure than a wrong colour.
+func recordSeverity(record protocol.StoredRecord) severity {
+	if record.Level != "" {
+		if level, ok := syslogPriorities[strings.ToLower(record.Level)]; ok {
+			return level
+		}
+	}
+	return detectSeverity(record.Line)
 }
 
 // graphGlyphs maps a bucket onto one column, indexed by level.
@@ -2194,7 +2242,7 @@ func (m *model) renderMain(width, height int) string {
 			rec := records[i]
 			selected := i == m.lineIndex
 			gutter, bodyWidth := gutterOf(i)
-			level := detectSeverity(rec.Line)
+			level := recordSeverity(rec)
 			chunks := m.recordRows(rec, bodyWidth)
 
 			// The cursor highlights the record's first row only. Highlighting
@@ -2274,7 +2322,7 @@ func (m *model) recordGutter(record protocol.StoredRecord, selected bool, innerW
 func gutterParts(record protocol.StoredRecord, innerWidth int) (badge, category string) {
 	category = safeText(record.Category)
 	if innerWidth >= minWidthForBadge {
-		if tag := detectSeverity(record.Line).String(); tag != "" {
+		if tag := recordSeverity(record).String(); tag != "" {
 			badge = tag + " "
 		}
 	}

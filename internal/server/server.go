@@ -271,6 +271,7 @@ func (run *runtime) handle(conn net.Conn) {
 			App:        record.App,
 			Category:   record.Category,
 			Line:       record.Line,
+			Level:      record.Level,
 		}
 		if err := run.append(stored); err != nil {
 			return
@@ -315,6 +316,9 @@ func validateRecord(record protocol.Record, apps map[string]bool) error {
 	}
 	if len(record.Line) > protocol.MaxLineSize {
 		return fmt.Errorf("log line is too large")
+	}
+	if len(record.Level) > protocol.MaxLevelSize {
+		return fmt.Errorf("log level is too large")
 	}
 	switch record.Source {
 	case "file", "journald", "docker":
