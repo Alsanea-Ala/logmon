@@ -194,7 +194,19 @@ jobs:
 
           git add CHANGELOG.md
           git commit -m "chore: $VERSION"
-          git tag -a "$VERSION" -m "Release $VERSION"
+
+          # Retry/rerun safety: if the tag already points at this commit, keep
+          # going; if it points elsewhere, fail rather than retagging.
+          if git rev-parse "refs/tags/$VERSION" >/dev/null 2>&1; then
+            TAG_TARGET=$(git rev-parse "refs/tags/$VERSION^{}")
+            HEAD_TARGET=$(git rev-parse HEAD)
+            if [ "$TAG_TARGET" != "$HEAD_TARGET" ]; then
+              echo "tag $VERSION already exists on $TAG_TARGET (expected $HEAD_TARGET)"
+              exit 1
+            fi
+          else
+            git tag -a "$VERSION" -m "Release $VERSION"
+          fi
 
           # Two ordered pushes, never one `git push HEAD:main --follow-tags`.
           #
