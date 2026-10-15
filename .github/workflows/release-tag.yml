@@ -3,6 +3,14 @@ name: release-tag
 # Gated on ci.yml rather than duplicating it. workflow_run fires for every
 # ci.yml completion, including branch pushes, so the head_branch check is what
 # keeps a release off anything that is not main.
+#
+# Requires a repository setting this file cannot make: main has a
+# "changes must be made through a pull request" rule, so the push below fails
+# with GH006 unless github-actions[bot] is on the bypass list
+# (Settings -> Rules -> Bypass list), with "Do not allow bypassing the above
+# settings" unchecked. The commit being pushed only ever changes CHANGELOG.md,
+# so it is not worth a human approval per release. See CONTRIBUTING.md,
+# "Releases".
 on:
   workflow_run:
     workflows: [ci]
@@ -167,6 +175,12 @@ jobs:
           version: v2.14.2
           args: --unreleased --tag ${{ steps.bump.outputs.version }} --prepend CHANGELOG.md -v
 
+      # The checkout above leaves a detached HEAD, because workflow_run
+      # checks out a sha rather than a branch. Every git command in the next
+      # step would then work against a detached ref, so name it before use.
+      - name: attach the tested commit to a branch
+        run: git checkout -B "release/${{ steps.bump.outputs.version }}"
+
       - name: commit, tag, push, dispatch
         env:
           VERSION: ${{ steps.bump.outputs.version }}
@@ -181,7 +195,16 @@ jobs:
           git add CHANGELOG.md
           git commit -m "chore: $VERSION"
           git tag -a "$VERSION" -m "Release $VERSION"
-          git push origin HEAD:main --follow-tags
+
+          # Two ordered pushes, never one `git push HEAD:main --follow-tags`.
+          #
+          # That single form pushes the tag first, so a rejected branch push
+          # still leaves a published tag pointing at a commit that never
+          # reached main -- an unreleasable tag with no GitHub Release behind
+          # it, which is the state the v0.1.0 run got into. Under set -e a
+          # failed first push exits here, before the tag exists remotely.
+          git push origin HEAD:main
+          git push origin "refs/tags/$VERSION"
 
           # Both refs are pushed with GITHUB_TOKEN, and GitHub suppresses
           # workflow runs for token-created refs. Two consequences, one
