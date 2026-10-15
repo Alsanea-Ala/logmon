@@ -553,7 +553,8 @@ there is no web interface and no way to attach from another machine.
 
 | Key | Action |
 |---|---|
-| `Tab` | Switch pane (agents, files, logs) |
+| `Tab` / `shift+tab` | Focus the next or previous panel |
+| `1`, `2`, `3` | Focus the agents, files or logs panel |
 | `↑` / `↓` or `k` / `j` | Select log line |
 | `←` / `→` or `h` / `l` | Expand or collapse the date/app/agent tree |
 | `[` / `]` | Select category |
@@ -572,6 +573,20 @@ startup or `r`.
 
 `/` filters only those loaded records. It is not a search across stored data,
 and there is no pagination.
+
+## Navigation
+
+Three panels, and `tab` and `shift+tab` are the only keys that move between
+them. Both wrap.
+
+The arrow keys only expand and collapse the file tree. They used to also change
+focus, which meant the same key did one thing in one panel and another thing in
+a different one. On the agents panel and in the logs they now do nothing, which
+is the predictable outcome: a key that does nothing is easier to reason about
+than a key that silently moves you somewhere else.
+
+Panel titles carry their number, `[1] Agents`, so the digit shortcuts are
+discoverable without reading the help overlay.
 
 ## Filtering
 

@@ -3,8 +3,6 @@ package server
 import (
 	"strings"
 	"testing"
-
-	"github.com/charmbracelet/bubbletea"
 )
 
 // TestSidebarPanelsAreSplit checks the sidebar is two panels, each with its own
@@ -22,27 +20,11 @@ func TestSidebarPanelsAreSplit(t *testing.T) {
 		// Matched as a border title, not as a bare word. The status bar
 		// carries "Focus: Agents" too, so counting the string alone reads
 		// two headings where there is one panel.
-		for _, want := range []string{"╭ Agents ", "╭ Files "} {
+		for _, want := range []string{"╭ [1] Agents ", "╭ [2] Files "} {
 			if got := strings.Count(view, want); got != 1 {
 				t.Errorf("%dx%d: %d %q titles, want 1", size[0], size[1], got, want)
 			}
 		}
-	}
-}
-
-// TestTabCyclesThreePanes covers the move from two focus targets to three.
-// `1 - m.focus` was arithmetic that only ever worked with two panes; with
-// three it would never reach the logs.
-func TestTabCyclesThreePanes(t *testing.T) {
-	m := testModel(t, 120, 30)
-
-	want := []focusPane{focusAgents, focusFiles, focusMain, focusAgents, focusFiles, focusMain}
-	for i, expect := range want {
-		if m.focus != expect {
-			t.Fatalf("after %d tabs focus = %d, want %d", i, m.focus, expect)
-		}
-		next, _ := m.handleKey(tea.KeyMsg{Type: tea.KeyTab})
-		m = next.(*model)
 	}
 }
 

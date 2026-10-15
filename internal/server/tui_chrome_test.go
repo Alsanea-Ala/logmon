@@ -58,7 +58,7 @@ func TestPanelTitlesRendered(t *testing.T) {
 		m := testModel(t, size[0], size[1])
 		view := m.View()
 
-		for _, want := range []string{"Agents", "Files"} {
+		for _, want := range []string{"[1] Agents", "[2] Files"} {
 			if !strings.Contains(view, want) {
 				t.Errorf("%dx%d: no %q panel title:\n%s", size[0], size[1], want, view)
 			}
