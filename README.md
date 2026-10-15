@@ -563,6 +563,7 @@ there is no web interface and no way to attach from another machine.
 | `esc` | Clear the filter |
 | `w` | Show or hide line wrapping |
 | `g` | Show or hide the ingest graph |
+| `t` | Cycle the log time window |
 | `r` | Rescan storage |
 | `?` | Keybindings |
 | `q`, `ctrl+c` | Quit the server |
@@ -623,6 +624,21 @@ shrinks to two columns so the continuation still has room to show something.
 
 A single line can be up to 128 KiB, so a wrapped record is cut at 20 rows and
 marked `+more`. Uncapped, one record would be the entire panel.
+
+## Log Time Window
+
+`t` cycles `5m`, `1h`, `24h` and `all`. The active limit is in the status bar,
+because a short panel is ambiguous and you need to know whether you are looking
+at less data or less time.
+
+This is a filter on what is displayed, not on what is read. The file is loaded in
+full either way, so a window saves no disk reads and does not make the server do
+less work. What it saves is reading a day of records when you wanted the last
+hour.
+
+Records arriving live obey the window, judged by their receipt time, so a
+backdated record that shows up now is outside it. The setting survives `r` and
+survives switching files.
 
 ## Ingest Graph
 
@@ -766,6 +782,8 @@ tail -f /var/lib/logmon/$(date -u +%F)/<app>/<agent-id>.jsonl
   legal on the wire and is not fully readable in the panel.
 - The ingest graph is live-only and short-lived: 60 one-second buckets of what
   arrived while the TUI was running, never backfilled from storage.
+- The log time window is a display filter. The file is still read in full, so a
+  window reduces what you read, not what the server reads.
 - Rescanning storage walks the whole data directory, so `r` and startup get
   slower as history accumulates.
 - Viewing requires a terminal on the server host. There is no remote or HTTP
