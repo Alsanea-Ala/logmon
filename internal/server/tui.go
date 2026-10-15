@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -226,6 +228,66 @@ type tickMsg time.Time
 
 type focusPane int
 
+// filterScope is which field of a record the text filter is matched against.
+type filterScope int
+
+const (
+	filterMessage filterScope = iota
+	filterCategory
+	filterAgent
+	filterScopeCount
+)
+
+// filterMatch is how the text filter is matched.
+type filterMatch int
+
+const (
+	matchSubstring filterMatch = iota
+	matchRegex
+)
+
+func (s filterScope) String() string {
+	switch s {
+	case filterCategory:
+		return "cat"
+	case filterAgent:
+		return "agent"
+	default:
+		return "msg"
+	}
+}
+
+func (m filterMatch) String() string {
+	if m == matchRegex {
+		return "re"
+	}
+	return "sub"
+}
+
+// Line wrapping.
+//
+// Truncation is the default. A log tail exists to be scanned, and one wrapped
+// 128 KiB line pushes every other record off screen. Wrapping is opt-in for
+// the case where the whole line is the point.
+const (
+	// Ceiling on the rows one record may occupy. A single log line can be
+	// `MaxLineSize`, which at any plausible panel width is thousands of rows:
+	// uncapped, one record would be the entire panel.
+	wrapMaxRows = 20
+
+	// Rows a wrapped record must leave for text before continuation lines align
+	// under the message column rather than taking a fixed small indent.
+	wrapMinText = 20
+
+	// Continuation indent when aligning under the message column would leave
+	// less than wrapMinText. The gutter is about 28 columns, so on a narrow
+	// panel full alignment leaves nothing readable on the second row.
+	wrapNarrowIndent = 2
+
+	// Appended to the last visible row of a record cut at wrapMaxRows.
+	wrapMarker = " +more"
+)
+
 // Three panes, because the sidebar is two panels. Tab advances modulo the
 // count; `1 - m.focus` only ever worked with two.
 const (
@@ -265,6 +327,24 @@ type model struct {
 	filtering     bool
 	filterBuffer  string
 	agentFilter   string // filter logs by agent ID
+
+	// Text filter. filter is the committed pattern, which while filtering is
+	// kept equal to filterBuffer so the panel narrows on every keystroke
+	// rather than on enter.
+	filterScope filterScope
+	filterMatch filterMatch
+	filterRe    *regexp.Regexp // compiled once, reused across frames
+	filterBad   bool           // last pattern did not compile
+
+	// wrap is off by default; see the wrapping constants.
+	wrap bool
+
+	// filtered() runs on every View() to produce about twenty rows out of up
+	// to a thousand records, so its result is cached and invalidated by key.
+	// len(m.records) changes on every append and is nil after a load, which is
+	// what makes it sufficient to key on.
+	filteredCache []protocol.StoredRecord
+	filteredKey   string
 
 	// Palette and chrome. p is the single source of colour truth; every style
 	// below is built from it rather than carrying its own literals.
@@ -555,6 +635,10 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.graphEnabled = !m.graphEnabled
 		return m, nil
 
+	case "w":
+		m.wrap = !m.wrap
+		return m, nil
+
 	case "/":
 		m.filtering = true
 		m.filterBuffer = ""
@@ -584,37 +668,116 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// handleFilterInput owns the keyboard while a filter is open.
+//
+// Filter mode runs before focus cycling and before the help overlay, so `tab`
+// and `ctrl+r` mean something different here than they do outside it. That is
+// the whole reason those keys were free to be claimed.
 func (m *model) handleFilterInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
+		// Cancel undoes the filtering it just did. Leaving m.filter set would
+		// mean esc appeared to do nothing.
 		m.filtering = false
 		m.filterBuffer = ""
+		m.setFilter("")
 		return m, nil
+
 	case "enter":
-		m.filter = m.filterBuffer
+		// Stop editing, keep what was typed.
 		m.filtering = false
 		m.filterBuffer = ""
-		m.applyFilter()
 		return m, nil
-	case "backspace":
-		if len(m.filterBuffer) > 0 {
-			m.filterBuffer = m.filterBuffer[:len(m.filterBuffer)-1]
+
+	case "tab":
+		m.filterScope = (m.filterScope + 1) % filterScopeCount
+		m.clampLine()
+		return m, nil
+
+	case "ctrl+r":
+		if m.filterMatch == matchRegex {
+			m.filterMatch = matchSubstring
+		} else {
+			m.filterMatch = matchRegex
 		}
+		m.recompile()
 		return m, nil
+
+	case "backspace":
+		// By rune, not by byte: a filter holding a multi-byte character would
+		// otherwise lose its last byte and leave invalid UTF-8 in the buffer.
+		buffer := []rune(m.filterBuffer)
+		if len(buffer) > 0 {
+			m.filterBuffer = string(buffer[:len(buffer)-1])
+		}
+		m.setFilter(m.filterBuffer)
+		return m, nil
+
 	default:
-		if len(msg.String()) == 1 {
-			m.filterBuffer += msg.String()
+		// Type, not length. msg.String() is a byte count, so "ü" is two bytes
+		// long and a length check drops it: typing any non-ASCII character into
+		// a filter would silently do nothing at all.
+		if msg.Type == tea.KeyRunes && len(msg.Runes) == 1 {
+			m.filterBuffer += string(msg.Runes[0])
+			m.setFilter(m.filterBuffer)
 		}
 		return m, nil
 	}
 }
 
+// setFilter replaces the committed pattern and recompiles.
+func (m *model) setFilter(pattern string) {
+	m.filter = pattern
+	m.recompile()
+}
+
+// recompile rebuilds the matcher and clamps the cursor.
+//
+// A pattern that does not compile leaves filterRe holding the last good one and
+// raises filterBad, so a half-typed regex narrows nothing away and then
+// recovers as it becomes valid. Compiling per keystroke instead of caching is
+// the alternative, and this runs on a path that also runs on every frame.
+//
+// Regex matching is case-insensitive to match substring matching. A filter
+// whose case sensitivity changes when you toggle a mode is a filter you have to
+// think about.
+func (m *model) recompile() {
+	switch {
+	case m.filter == "":
+		m.filterRe = nil
+		m.filterBad = false
+	case m.filterMatch == matchRegex:
+		re, err := regexp.Compile("(?i)" + m.filter)
+		if err != nil {
+			m.filterBad = true
+		} else {
+			m.filterRe = re
+			m.filterBad = false
+		}
+	default:
+		m.filterRe = nil
+		m.filterBad = false
+	}
+	m.clampLine()
+}
+
+// clampLine keeps the cursor inside the filtered set.
+//
+// The cursor survives across filter changes rather than being reset to the top,
+// so narrowing the filter while scrolled down leaves the operator where they
+// were reading. Resetting to zero on every keystroke of live filtering would
+// move the panel out from under them.
+func (m *model) clampLine() {
+	last := len(m.filtered()) - 1
+	if last < 0 {
+		last = 0
+	}
+	m.lineIndex = min(max(0, m.lineIndex), last)
+}
+
+// applyFilter is called when a filter is committed or cleared.
 func (m *model) applyFilter() {
-	// Filtering records and sidebar entries is not implemented; only the
-	// selection reset is live. The focus branches that used to sit here were
-	// empty, so staticcheck flagged them. Do not read them as a partial
-	// implementation.
-	m.lineIndex = 0
+	m.clampLine()
 }
 
 func (m *model) moveUp() (tea.Model, tea.Cmd) {
@@ -1363,6 +1526,163 @@ func graphGlyph(v, peak int) string {
 	return graphGlyphs[idx]
 }
 
+// recordRows splits one record's message into the rows it will occupy in the
+// log panel.
+//
+// With wrapping off this is always one truncated row, which is what the panel
+// has always done and why the cursor is a record index rather than a row index.
+func (m *model) recordRows(record protocol.StoredRecord, bodyWidth int) []string {
+	if bodyWidth < 1 {
+		bodyWidth = 1
+	}
+	text := safeText(record.Line)
+	if !m.wrap {
+		return []string{truncateText(text, bodyWidth)}
+	}
+	return wrapText(text, bodyWidth, wrapMaxRows)
+}
+
+// wrapText breaks a line into rows of at most width columns, stopping after
+// maxRows and marking the cut.
+//
+// The cap is not cosmetic. `MaxLineSize` permits a 128 KiB line, which at a
+// 76-column panel is over a thousand rows: uncapped, a single record is the
+// entire panel and the other twenty visible rows are its continuation.
+func wrapText(s string, width, maxRows int) []string {
+	if width < 1 || maxRows < 1 {
+		return nil
+	}
+	if lipgloss.Width(s) <= width {
+		return []string{s}
+	}
+
+	rows := make([]string, 0, maxRows)
+	rest := s
+	for len(rows) < maxRows {
+		chunk, remainder := breakLine(rest, width)
+		rows = append(rows, chunk)
+		if remainder == "" {
+			return rows
+		}
+		rest = remainder
+	}
+
+	// Cut at the cap with text still to come. Say so: a log line that stops
+	// mid-sentence with no marker reads as the whole line, and the operator
+	// cannot tell that from the panel.
+	last := len(rows) - 1
+	rows[last] = truncateText(rows[last], max(1, width-lipgloss.Width(wrapMarker))) + wrapMarker
+	return rows
+}
+
+// breakLine takes as much of s as fits in width columns and returns it with
+// the remainder.
+//
+// The break prefers the last space in the row, and falls back to a hard cut.
+// A URL, a hash, or a base64 blob has no spaces to break on, and treating those
+// as unbreakable would drop the row on the floor.
+func breakLine(s string, width int) (string, string) {
+	if width < 1 {
+		return "", s
+	}
+
+	runes := []rune(s)
+	fit, used := 0, 0
+	for fit < len(runes) {
+		w := lipgloss.Width(string(runes[fit]))
+		if used+w > width {
+			break
+		}
+		used += w
+		fit++
+	}
+	// Width is measured in cells and a double-width rune can exceed it on its
+	// own. Consume one regardless so the loop always terminates.
+	if fit == 0 {
+		fit = 1
+	}
+	if fit >= len(runes) {
+		return s, ""
+	}
+
+	head := runes[:fit]
+	if at := lastSpace(head); at > 0 {
+		return string(head[:at]), strings.TrimLeft(string(runes[at:]), " ")
+	}
+	return string(head), string(runes[fit:])
+}
+
+func lastSpace(runes []rune) int {
+	for i := len(runes) - 1; i >= 0; i-- {
+		if unicode.IsSpace(runes[i]) {
+			return i
+		}
+	}
+	return -1
+}
+
+// wrapIndent is the left padding for continuation rows.
+//
+// Aligning under the message column is the readable choice, and the gutter is
+// about 28 columns wide, so on a narrow panel that alignment leaves a
+// continuation row with almost nothing to show. Below wrapMinText of room the
+// indent drops to two instead, which still reads as a continuation and still
+// leaves the panel usable.
+func wrapIndent(gutterWidth, innerWidth int) int {
+	if innerWidth-gutterWidth < wrapMinText {
+		return wrapNarrowIndent
+	}
+	return gutterWidth
+}
+
+// windowRecords picks the records to draw, measured in rows rather than
+// records.
+//
+// The window is filled both ways from the cursor: backwards so the record under
+// the cursor stays on screen, and forwards into whatever budget is left, which
+// is what fills the panel when the cursor is near the top. Counting records
+// against the budget drew too many once one record could occupy several rows.
+//
+// Walking backwards costs one step per row consumed, so it is bounded by the
+// budget rather than by the record count. A thousand records stay cheap.
+func (m *model) windowRecords(records []protocol.StoredRecord, budget, innerWidth int, gutterOf func(int) (string, int)) (int, int) {
+	if budget < 1 {
+		budget = 1
+	}
+	cursor := min(max(0, m.lineIndex), len(records)-1)
+
+	used := 0
+	start := cursor
+	for i := cursor; i >= 0; i-- {
+		_, bodyWidth := gutterOf(i)
+		size := len(m.recordRows(records[i], bodyWidth))
+		if used > 0 && used+size > budget {
+			break
+		}
+		used += size
+		start = i
+		if used >= budget {
+			break
+		}
+	}
+
+	end := cursor + 1
+	for i := cursor + 1; i < len(records); i++ {
+		_, bodyWidth := gutterOf(i)
+		size := len(m.recordRows(records[i], bodyWidth))
+		if used+size > budget {
+			break
+		}
+		used += size
+		end = i + 1
+		if used >= budget {
+			break
+		}
+	}
+
+	return start, end
+}
+
 // pushBucket appends a completed bucket and drops the oldest, keeping the ring
 // bounded. A session left open for days would otherwise grow one int per
 // second forever.
@@ -1417,64 +1737,66 @@ func (m *model) renderMain(width, height int) string {
 	records := m.filtered()
 	if len(records) == 0 {
 		if textRows > 0 {
-			rows = append(rows, "  (no logs)")
+			rows = append(rows, "  "+m.emptyState())
 		}
 	} else {
-		available := min(max(1, textRows), len(records))
-		start := max(0, m.lineIndex-available+1)
-		end := min(len(records), start+available)
+		// The gutter depends on the record, so the body width does too, and the
+		// window has to be measured against the same widths the rows will use.
+		gutterOf := func(i int) (string, int) {
+			gutter := m.recordGutter(records[i], i == m.lineIndex, innerWidth)
+			return gutter, max(1, innerWidth-lipgloss.Width(gutter))
+		}
+
+		start, end := m.windowRecords(records, max(1, textRows), innerWidth, gutterOf)
 
 		for i := start; i < end; i++ {
-			marker := " "
-			if i == m.lineIndex {
-				marker = "►"
-			}
 			rec := records[i]
-			stamp := rec.ReceivedAt.Format("15:04:05")
-			category := safeText(rec.Category)
+			selected := i == m.lineIndex
+			gutter, bodyWidth := gutterOf(i)
 			level := detectSeverity(rec.Line)
+			chunks := m.recordRows(rec, bodyWidth)
 
-			// The badge is dropped first on a narrow panel: it is three
-			// characters of decoration, and the colour still carries the
-			// level even once the text is gone. What is not dropped is the
-			// message itself, which is the reason the panel exists.
-			badge := ""
-			if innerWidth >= minWidthForBadge {
-				if tag := level.String(); tag != "" {
-					badge = tag + " "
+			// The cursor highlights the record's first row only. Highlighting
+			// every row of one wrapped record makes it read as several records
+			// that happen to share a timestamp.
+			if selected {
+				rows = append(rows, st.selected.Width(innerWidth).Render(gutter+chunks[0]))
+			} else {
+				var badgeStyle lipgloss.Style
+				switch level {
+				case severityError:
+					badgeStyle = st.error
+				case severityWarn:
+					badgeStyle = st.warn
+				case severityInfo:
+					badgeStyle = st.info
+				case severityDebug:
+					badgeStyle = st.debug
+				default:
+					badgeStyle = st.plain
 				}
-			}
-			gutter := fmt.Sprintf("%s %s %s%-12s ", marker, stamp, badge, category)
-			body := truncateText(safeText(rec.Line), max(1, innerWidth-lipgloss.Width(gutter)))
+				bodyStyle := badgeStyle
+				if level == severityPlain {
+					bodyStyle = lipgloss.NewStyle()
+				}
 
-			if i == m.lineIndex {
-				rows = append(rows, st.selected.Width(innerWidth).Render(gutter+body))
+				stamp := rec.ReceivedAt.Format("15:04:05")
+				badge, category := gutterParts(rec, innerWidth)
+				rows = append(rows, " "+
+					st.time.Render(stamp)+" "+
+					badgeStyle.Render(badge)+
+					st.category.Render(fmt.Sprintf("%-12s ", category))+
+					bodyStyle.Render(chunks[0]))
+			}
+
+			if len(chunks) < 2 {
 				continue
 			}
-
-			var badgeStyle lipgloss.Style
-			switch level {
-			case severityError:
-				badgeStyle = st.error
-			case severityWarn:
-				badgeStyle = st.warn
-			case severityInfo:
-				badgeStyle = st.info
-			case severityDebug:
-				badgeStyle = st.debug
-			default:
-				badgeStyle = st.plain
+			indent := strings.Repeat(" ", wrapIndent(lipgloss.Width(gutter), innerWidth))
+			for _, chunk := range chunks[1:] {
+				rows = append(rows, st.plain.Render(
+					truncateText(indent+chunk, innerWidth)))
 			}
-			bodyStyle := badgeStyle
-			if level == severityPlain {
-				bodyStyle = lipgloss.NewStyle()
-			}
-
-			rows = append(rows, marker+
-				st.time.Render(stamp)+" "+
-				badgeStyle.Render(badge)+
-				st.category.Render(fmt.Sprintf("%-12s ", category))+
-				bodyStyle.Render(body))
 		}
 	}
 
@@ -1483,6 +1805,54 @@ func (m *model) renderMain(width, height int) string {
 	}
 
 	return panel("Logs", strings.Join(rows, "\n"), width, height, m.borderStyle, m.focus == focusMain, m.p)
+}
+
+// recordGutter is the fixed column a record's message starts after: cursor
+// marker, receipt time, severity badge, category.
+//
+// The badge is dropped first on a narrow panel: it is three characters of
+// decoration, and the colour still carries the level even once the text is
+// gone. What is not dropped is the message itself, which is the reason the
+// panel exists.
+func (m *model) recordGutter(record protocol.StoredRecord, selected bool, innerWidth int) string {
+	badge, category := gutterParts(record, innerWidth)
+	marker := " "
+	if selected {
+		marker = "►"
+	}
+	return fmt.Sprintf("%s %s %s%-12s ", marker, record.ReceivedAt.Format("15:04:05"), badge, category)
+}
+
+// gutterParts is the badge and category, on their own, for the unselected row
+// where each piece is styled separately.
+func gutterParts(record protocol.StoredRecord, innerWidth int) (badge, category string) {
+	category = safeText(record.Category)
+	if innerWidth >= minWidthForBadge {
+		if tag := detectSeverity(record.Line).String(); tag != "" {
+			badge = tag + " "
+		}
+	}
+	return badge, category
+}
+
+// emptyState distinguishes an empty file from everything filtered away.
+//
+// "(no logs)" and "(no records match ...)" answer different questions, and
+// collapsing them into one string is how a working filter looks like data loss.
+func (m *model) emptyState() string {
+	switch {
+	case m.filter != "":
+		if m.filterBad {
+			return fmt.Sprintf("(bad pattern %q)", m.filter)
+		}
+		return fmt.Sprintf("(no records match %q)", m.filter)
+	case m.agentFilter != "":
+		return fmt.Sprintf("(no records from %s)", m.agentFilter)
+	case len(m.categories) > 0 && m.categoryIndex > 0:
+		return fmt.Sprintf("(no records in %s)", m.categories[m.categoryIndex])
+	default:
+		return "(no logs)"
+	}
 }
 
 // keybinding is one row of the help overlay.
@@ -1507,10 +1877,11 @@ var keybindings = []keybinding{
 	{"enter", "open a node, or filter by the selected agent"},
 	{"r", "rescan storage"},
 	{"g", "toggle the ingest graph"},
-	{"/", "filter records"},
+	{"/", "filter records: tab scope, ctrl+r regex"},
 	{"esc", "clear the filter, or close this"},
 	{"[", "previous category"},
 	{"]", "next category"},
+	{"w", "toggle line wrapping"},
 }
 
 // renderHelp draws the keybinding overlay at exactly w by h.
@@ -1574,10 +1945,17 @@ func (m *model) renderStatusBar(minimal bool) string {
 		connected, len(m.agents), len(m.files), focusStr)
 
 	var bar string
-	if m.filtering {
-		bar = " Filter: " + st.error.Render(m.filterBuffer+"_")
-	} else if m.filter != "" {
-		bar = " Filter: " + st.error.Render(m.filter) + "  (esc to clear)"
+	switch {
+	case m.filtering:
+		bar = fmt.Sprintf(" Filter [%s|%s] %s_", m.filterScope, m.filterMatch, m.filterBuffer)
+		if m.filterBad {
+			bar += "  (bad pattern)"
+		}
+	case m.filter != "":
+		bar = " Filter: " + m.filter + "  (esc to clear)"
+		if m.filterBad {
+			bar += "  (bad pattern)"
+		}
 	}
 
 	if bar == "" {
@@ -1620,7 +1998,45 @@ func (m *model) scan() tea.Cmd {
 	return scanFiles(m.dataDir, m.scanVersion)
 }
 
+// filtered returns the records the log panel should show.
+//
+// This runs on every View() to produce about twenty rows out of up to a
+// thousand records, so the result is cached. Recomputing it per frame was
+// tolerable when the only work was two integer comparisons per record, and
+// stops being tolerable the moment it also does a substring match.
 func (m *model) filtered() []protocol.StoredRecord {
+	key := m.filterKey()
+	if key == m.filteredKey {
+		return m.filteredCache
+	}
+	result := m.computeFiltered()
+	m.filteredCache = result
+	m.filteredKey = key
+	return result
+}
+
+// filterKey identifies the inputs filtered() depends on.
+//
+// len(m.records) stands in for the record set: it changes on every append
+// through appendRecord and drops to zero on loadSelected, and no other path
+// mutates m.records. Keying on content instead would mean hashing a thousand
+// records on every frame, which is the cost this cache exists to avoid.
+func (m *model) filterKey() string {
+	category := ""
+	if len(m.categories) > 0 && m.categoryIndex > 0 {
+		category = m.categories[m.categoryIndex]
+	}
+	return strings.Join([]string{
+		m.filter,
+		strconv.Itoa(int(m.filterScope)),
+		strconv.Itoa(int(m.filterMatch)),
+		category,
+		m.agentFilter,
+		strconv.Itoa(len(m.records)),
+	}, "\x00")
+}
+
+func (m *model) computeFiltered() []protocol.StoredRecord {
 	filtered := m.records
 
 	// filter by category
@@ -1646,7 +2062,49 @@ func (m *model) filtered() []protocol.StoredRecord {
 		filtered = agentFiltered
 	}
 
+	if m.filter != "" {
+		matched := make([]protocol.StoredRecord, 0, len(filtered))
+		for _, record := range filtered {
+			if recordMatches(record, m.filter, m.filterScope, m.filterMatch, m.filterRe) {
+				matched = append(matched, record)
+			}
+		}
+		filtered = matched
+	}
+
 	return filtered
+}
+
+// recordMatches tests one record against the active text filter.
+func recordMatches(record protocol.StoredRecord, needle string, scope filterScope, match filterMatch, re *regexp.Regexp) bool {
+	var haystack string
+	switch scope {
+	case filterCategory:
+		haystack = record.Category
+	case filterAgent:
+		haystack = record.AgentID
+	default:
+		haystack = record.Line
+	}
+
+	if match == matchRegex {
+		// A nil re means the pattern never compiled and there is no earlier
+		// good one either, so nothing is filtered out rather than everything.
+		if re == nil {
+			return true
+		}
+		return re.MatchString(haystack)
+	}
+
+	needle = strings.ToLower(needle)
+	return strings.Contains(strings.ToLower(haystack), needle)
+}
+
+// filterActive reports whether anything is narrowing the panel, so the empty
+// state can say "nothing matched" rather than "nothing here".
+func (m *model) filterActive() bool {
+	return m.filter != "" || m.agentFilter != "" ||
+		(len(m.categories) > 0 && m.categoryIndex > 0)
 }
 
 func (m *model) ensureFile(file logFile) int {

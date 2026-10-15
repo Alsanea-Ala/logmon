@@ -560,6 +560,7 @@ there is no web interface and no way to attach from another machine.
 | `Enter` | Open the selected file |
 | `/` | Filter loaded records |
 | `esc` | Clear the filter |
+| `w` | Show or hide line wrapping |
 | `g` | Show or hide the ingest graph |
 | `r` | Rescan storage |
 | `?` | Keybindings |
@@ -571,6 +572,42 @@ startup or `r`.
 
 `/` filters only those loaded records. It is not a search across stored data,
 and there is no pagination.
+
+## Filtering
+
+The filter narrows the panel as you type. Both halves of the query are shown in
+the status bar, so you always know what you are searching and how.
+
+```text
+/           open the filter
+tab         cycle what is matched: msg, cat, agent
+ctrl+r      toggle substring or regular expression
+enter       stop editing, keep the filter
+esc         cancel, and clear it
+```
+
+Both modes are case-insensitive, so switching to a regex does not quietly change
+the case sensitivity you were filtering under.
+
+A regular expression that does not compile leaves the previous results in place
+and marks the status bar `bad pattern`. The panel does not empty while you are
+half-way through typing one, and it recovers on its own once the pattern closes.
+
+When nothing matches, the panel says `(no records match "...")` rather than
+`(no logs)`. Those are different problems and the panel tells them apart.
+
+## Line Wrapping
+
+Log lines are truncated with an ellipsis by default. A log tail exists to be
+scanned, and one very long line pushed to the top would push every other record
+off screen.
+
+`w` switches the log panel to wrapping. Wrapped rows are indented under the
+message column so they read as one entry, and on a narrow panel the indent
+shrinks to two columns so the continuation still has room to show something.
+
+A single line can be up to 128 KiB, so a wrapped record is cut at 20 rows and
+marked `+more`. Uncapped, one record would be the entire panel.
 
 ## Ingest Graph
 
@@ -710,6 +747,8 @@ tail -f /var/lib/logmon/$(date -u +%F)/<app>/<agent-id>.jsonl
 - The TUI holds at most the latest 1,000 records from the selected file. `/`
   filters only those loaded records; there is no search across stored data and
   no pagination.
+- A wrapped log record is cut at 20 rows and marked. A line over 128 KiB is
+  legal on the wire and is not fully readable in the panel.
 - The ingest graph is live-only and short-lived: 60 one-second buckets of what
   arrived while the TUI was running, never backfilled from storage.
 - Rescanning storage walks the whole data directory, so `r` and startup get
