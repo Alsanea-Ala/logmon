@@ -10,6 +10,12 @@ every release. Edit the header above by hand; edit nothing below the marker.
 -->
 
 <!-- git-cliff: end of header -->
+## [0.2.1] - 2026-10-15
+
+### Bug Fixes
+
+- *(docs)* Three keybinding rows in the README understated what the keys do
+
 ## [0.2.0] - 2026-10-15
 
 ### Features
