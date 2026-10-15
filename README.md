@@ -553,14 +553,16 @@ there is no web interface and no way to attach from another machine.
 
 | Key | Action |
 |---|---|
-| `Tab` | Switch pane (sidebar, logs) |
+| `Tab` | Switch pane (agents, files, logs) |
 | `↑` / `↓` or `k` / `j` | Select log line |
 | `←` / `→` or `h` / `l` | Expand or collapse the date/app/agent tree |
 | `[` / `]` | Select category |
 | `Enter` | Open the selected file |
 | `/` | Filter loaded records |
 | `esc` | Clear the filter |
+| `g` | Show or hide the ingest graph |
 | `r` | Rescan storage |
+| `?` | Keybindings |
 | `q`, `ctrl+c` | Quit the server |
 
 The TUI keeps at most the latest 1,000 records from the selected file in memory.
@@ -569,6 +571,25 @@ startup or `r`.
 
 `/` filters only those loaded records. It is not a search across stored data,
 and there is no pagination.
+
+## Ingest Graph
+
+The log panel carries two sparklines: records per second across every
+connected agent, and records per second for the selected agent. Each row
+declares the peak its bars are scaled against, so a bar can be read back as a
+rate rather than guessed at.
+
+The window is the last 60 seconds of one-second buckets, updated once a second.
+
+Two limits worth knowing:
+
+- **The graph counts what this server receives while the TUI is running.** It is
+  not backfilled from storage, so it is flat until traffic arrives and says
+  nothing about earlier.
+- **It is the first thing dropped for space.** On a short terminal the log
+  panel cannot afford the rows, and the graph is hidden whatever `g` says.
+  Below that height the graph keeps counting and reappears when the terminal
+  grows.
 
 ## Behaviour When the Server Is Unavailable
 
@@ -689,6 +710,8 @@ tail -f /var/lib/logmon/$(date -u +%F)/<app>/<agent-id>.jsonl
 - The TUI holds at most the latest 1,000 records from the selected file. `/`
   filters only those loaded records; there is no search across stored data and
   no pagination.
+- The ingest graph is live-only and short-lived: 60 one-second buckets of what
+  arrived while the TUI was running, never backfilled from storage.
 - Rescanning storage walks the whole data directory, so `r` and startup get
   slower as history accumulates.
 - Viewing requires a terminal on the server host. There is no remote or HTTP

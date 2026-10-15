@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/Alsanea-Ala/logmon/internal/protocol"
@@ -28,6 +29,35 @@ const (
 )
 
 const maxVisibleRecords = 1000
+
+// Ingest graph.
+//
+// The buckets count records the TUI receives, not records on disk: there is no
+// backfill, so a graph is flat until traffic arrives and it says nothing about
+// what happened before the session started. That is the honest reading for a
+// live view, and backfilling would mean re-reading every JSONL file on a timer.
+//
+// The window is fixed at one minute of one-second buckets rather than being
+// derived from the panel width, so two terminals watching the same server show
+// the same shape instead of the same pixels.
+const (
+	graphBuckets = 60 // one bucket per second, one minute of history
+	graphTick    = time.Second
+
+	// Index 0 is a blank so a zero bucket reads as no traffic rather than as a
+	// low bar. Seven steps of block glyph is enough for a single row.
+	graphLevels = 8
+
+	// Interior rows below which the graph is dropped regardless of the toggle.
+	// At minTTYHeight the log panel has four interior rows; spending three of
+	// them on the graph would leave a single log line. The graph is the first
+	// thing sacrificed, the same way the severity badge goes first on width.
+	graphMinRows = 8
+
+	// Column reserved for the series label. Wide enough for the agent IDs the
+	// sidebar already renders, and fixed so the bars start at a consistent x.
+	graphLabelWidth = 12
+)
 
 // Responsive layout breakpoints (terminal columns/rows).
 const (
@@ -188,6 +218,12 @@ type loadMsg struct {
 type recordMsg protocol.StoredRecord
 type agentMsg agentStatus
 
+// tickMsg advances the ingest graph. The next tick is scheduled when one
+// arrives rather than on a timer, so exactly one is ever outstanding: a
+// scheduler that re-armed itself on every Update would compound into a tick
+// storm, and nothing else in this model would reveal that.
+type tickMsg time.Time
+
 type focusPane int
 
 // Three panes, because the sidebar is two panels. Tab advances modulo the
@@ -235,17 +271,41 @@ type model struct {
 	p           palette
 	borderStyle lipgloss.Border
 	showHelp    bool
+
+	// Ingest graph. graphPending counts records since the last tick and is
+	// folded into the ring on the next tickMsg.
+	//
+	// Two series rather than one: the global rate is what an operator watching
+	// the server wants, and the selected agent's rate is what explains the lines
+	// directly below it. Both are countable here because server.go notifies
+	// every stored record to the TUI, before the selection gate in the
+	// recordMsg case drops the ones that are not on screen.
+	graphEnabled     bool
+	graphCounts      []int // all agents, records per second
+	graphPending     int
+	fileGraphCounts  []int // selected agent only, records per second
+	fileGraphPending int
 }
 
 func newModel(dataDir string) *model {
 	return &model{
-		dataDir:     dataDir,
-		categories:  []string{"all"},
-		agents:      make(map[string]agentStatus),
-		focus:       focusAgents,
-		p:           defaultPalette,
-		borderStyle: lipgloss.RoundedBorder(),
+		dataDir: dataDir,
+		// The graph starts on because it is the panel's reason to exist and the
+		// row budget is what hides it, not the operator opting in. `g` turns it
+		// off on a terminal where it is not wanted.
+		categories:   []string{"all"},
+		agents:       make(map[string]agentStatus),
+		focus:        focusAgents,
+		p:            defaultPalette,
+		borderStyle:  lipgloss.RoundedBorder(),
+		graphEnabled: true,
 	}
+}
+
+// tick schedules the next graph bucket. Called from Init and from the tickMsg
+// case, never on a timer.
+func (m *model) tick() tea.Cmd {
+	return tea.Tick(graphTick, func(t time.Time) tea.Msg { return tickMsg(t) })
 }
 
 // palette holds every colour the TUI uses.
@@ -337,7 +397,7 @@ func (p palette) severityStyles() styles {
 }
 
 func (m *model) Init() tea.Cmd {
-	return m.scan()
+	return tea.Batch(m.scan(), m.tick())
 }
 
 func (m *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
@@ -384,9 +444,25 @@ func (m *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.lineIndex = max(0, len(m.filtered())-1)
 		return m, nil
 
+	case tickMsg:
+		// Only the graph is touched. A tick that landed while a scan or load was
+		// in flight must not clear the pending load, reset the cursor, or drop
+		// records, so nothing here reads or writes m.records, m.files or the
+		// version counters.
+		m.graphCounts = pushBucket(m.graphCounts, m.graphPending)
+		m.graphPending = 0
+		m.fileGraphCounts = pushBucket(m.fileGraphCounts, m.fileGraphPending)
+		m.fileGraphPending = 0
+		return m, m.tick()
+
 	case recordMsg:
 		m.scanVersion++
 		record := protocol.StoredRecord(message.(recordMsg))
+		// Counted above the selection gate: the global rate covers every agent
+		// the server is ingesting, including the ones whose records are not on
+		// screen. Counting it below the gate would have made the graph
+		// describe only whatever file happened to be open.
+		m.graphPending++
 		file := logFile{
 			Date:  record.ReceivedAt.Format("2006-01-02"),
 			App:   record.App,
@@ -395,6 +471,9 @@ func (m *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		index := m.ensureFile(file)
 		if index == m.fileIndex {
+			// Below the gate, so this counts only the agent whose records the
+			// log panel is about to show.
+			m.fileGraphPending++
 			m.records = appendRecord(m.records, record)
 			if m.loadingPath == file.Path {
 				m.pending = appendRecord(m.pending, record)
@@ -467,6 +546,14 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "r":
 		return m, m.scan()
+
+	case "g":
+		// Only the preference. Whether the graph actually appears is decided
+		// against the row budget at render time, so toggling this on a short
+		// terminal looks like nothing happened. That is intentional: the
+		// preference persists in meaning, the row budget is what hides it.
+		m.graphEnabled = !m.graphEnabled
+		return m, nil
 
 	case "/":
 		m.filtering = true
@@ -1152,6 +1239,141 @@ func detectSeverity(line string) severity {
 	return severityPlain
 }
 
+// graphGlyphs maps a bucket onto one column, indexed by level.
+//
+// A []string rather than a string constant on purpose. Indexing a string by
+// level yields a byte, and slicing it at that level yields half a block
+// character: the glyphs are multi-byte, so the level is a rune offset and not a
+// byte offset. Either mistake renders a corrupt graph rather than failing to
+// compile, so the type makes it unrepresentable.
+//
+// TestGraphGlyphCountMatchesLevels keeps this and graphLevels in step.
+var graphGlyphs = []string{" ", "▁", "▂", "▃", "▄", "▅", "▆", "█"}
+
+// graphVisible reports whether the graph should be drawn in a panel of the
+// given height.
+//
+// The toggle is a preference and the row budget is the veto. At minTTYHeight
+// the log panel has four interior rows, so drawing the graph unconditionally
+// would leave the log panel with a single line and no way to see why.
+func (m *model) graphVisible(height int) bool {
+	return m.graphEnabled && height-chromeHeight >= graphMinRows
+}
+
+// graphRows renders the series, one per line, each a label, a bar and the peak
+// the bar is scaled against.
+//
+// The peak is declared on every row rather than implied by the bar height. A
+// sparkline scaled to its own maximum looks identical for a quiet hour and a
+// busy one, and a chart whose axis moves without saying so cannot be read.
+// Printing the maximum makes every bar convertible back to a rate.
+func (m *model) graphRows(width int) []string {
+	st := m.p.severityStyles()
+
+	rows := []string{graphRow("all agents", m.graphCounts, width, st.time)}
+	// The per-agent series only means something when a file is open. Without
+	// one there is no agent to name, and an empty second row is a mystery.
+	if len(m.files) > 0 {
+		rows = append(rows, graphRow(m.files[m.fileIndex].Agent, m.fileGraphCounts, width, st.category))
+	}
+	return rows
+}
+
+// graphRow lays out one series: label, bar, peak. Falls back to label and peak
+// alone when the panel is too narrow for a bar to mean anything.
+func graphRow(label string, counts []int, width int, style lipgloss.Style) string {
+	name := truncateText(safeText(label), graphLabelWidth)
+	right := fmt.Sprintf("peak %d/s", graphPeak(counts))
+
+	barWidth := width - graphLabelWidth - lipgloss.Width(right) - 2
+	if barWidth < 1 {
+		return truncateText(name+" "+right, max(1, width))
+	}
+
+	return style.Render(fmt.Sprintf("%-*s", graphLabelWidth, name)) + " " +
+		style.Render(sparkline(counts, barWidth)) + " " +
+		style.Render(right)
+}
+
+// graphPeak is the largest bucket in the series, which is the value the top of
+// the bar represents.
+func graphPeak(counts []int) int {
+	peak := 0
+	for _, v := range counts {
+		if v > peak {
+			peak = v
+		}
+	}
+	return peak
+}
+
+// sparkline renders counts as bar glyphs, right-aligned to the most recent
+// bucket.
+//
+// Only the newest width buckets are drawn when there are more of them, and the
+// left is padded when there are fewer. Buckets are dropped whole rather than
+// averaged: a one-second spike averaged into a wider column stops being a
+// spike, which is the one thing an ingest graph exists to show.
+func sparkline(counts []int, width int) string {
+	if width < 1 || len(counts) == 0 {
+		return ""
+	}
+
+	cols := counts
+	if len(cols) > width {
+		cols = cols[len(cols)-width:]
+	}
+
+	var b strings.Builder
+	if pad := width - len(cols); pad > 0 {
+		b.WriteString(strings.Repeat(" ", pad))
+	}
+	peak := graphPeak(cols)
+	for _, v := range cols {
+		b.WriteString(graphGlyph(v, peak))
+	}
+	return b.String()
+}
+
+// graphGlyph maps one bucket onto the block glyphs, given the peak of the
+// visible range.
+//
+// Index 0 of graphGlyphs is a blank, so a zero bucket reads as no traffic
+// rather than as the lowest possible bar. The remaining seven steps span 1 to
+// peak, which is why peak is a divisor below and not a multiplier: an integer
+// division that maps peak onto the top glyph exactly, with no off-by-one that
+// leaves the tallest bar one step short.
+func graphGlyph(v, peak int) string {
+	if v <= 0 || peak <= 0 {
+		return " "
+	}
+	if peak <= 1 {
+		return graphGlyphs[graphLevels-1]
+	}
+	// Rounded, not truncated. Truncating sends the midpoint of the range one
+	// step low, so a steady rate of exactly half the peak draws noticeably
+	// below half the height and the graph reads low across its whole range.
+	idx := 1 + ((v-1)*(graphLevels-2)+(peak-1)/2)/(peak-1)
+	if idx < 1 {
+		idx = 1
+	}
+	if idx >= graphLevels {
+		idx = graphLevels - 1
+	}
+	return graphGlyphs[idx]
+}
+
+// pushBucket appends a completed bucket and drops the oldest, keeping the ring
+// bounded. A session left open for days would otherwise grow one int per
+// second forever.
+func pushBucket(counts []int, value int) []int {
+	counts = append(counts, value)
+	if len(counts) > graphBuckets {
+		counts = counts[len(counts)-graphBuckets:]
+	}
+	return counts
+}
+
 func (m *model) renderMain(width, height int) string {
 	st := m.p.severityStyles()
 
@@ -1165,6 +1387,17 @@ func (m *model) renderMain(width, height int) string {
 	// add a phantom row that Height() cannot shrink.
 	chrome := 0
 	rows := make([]string, 0, height)
+
+	// Graph block, above the file header. It goes first so the newest activity
+	// sits directly above the newest records, which is the pair an operator
+	// reads together when correlating a spike with a line.
+	if m.graphVisible(height) {
+		for _, line := range m.graphRows(innerWidth) {
+			rows = append(rows, line)
+			chrome++
+		}
+	}
+
 	if len(m.files) > 0 {
 		file := m.files[m.fileIndex]
 		rows = append(rows, truncateText(
@@ -1273,6 +1506,7 @@ var keybindings = []keybinding{
 	{"right, l", "expand a node, or step on to the logs"},
 	{"enter", "open a node, or filter by the selected agent"},
 	{"r", "rescan storage"},
+	{"g", "toggle the ingest graph"},
 	{"/", "filter records"},
 	{"esc", "clear the filter, or close this"},
 	{"[", "previous category"},
@@ -1328,8 +1562,12 @@ func (m *model) renderStatusBar(minimal bool) string {
 	case m.width < 100:
 		hints = []string{"[Tab] switch", "[↑↓/jk] nav", "[←→] expand", "[Enter] open", "[q] quit", "[?] help"}
 	default:
+		// `g` is last so it is the first hint dropped. It was the ninth and
+		// the bar runs out of room long before that, and the two hints that
+		// disappeared along with it were how you quit and how you find out
+		// about the key that hides the graph in the first place.
 		hints = []string{"[Tab] switch", "[↑↓/jk] nav", "[←→/hl] expand", "[Enter] open",
-			"[/] filter", "[r] refresh", "[?] help", "[q] quit"}
+			"[/] filter", "[r] refresh", "[?] help", "[q] quit", "[g] graph"}
 	}
 
 	counters := fmt.Sprintf("Agents: %d/%d   Files: %d   Focus: %s",
