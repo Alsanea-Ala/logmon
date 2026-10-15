@@ -8,6 +8,11 @@
 ```
 
 [![StandWithPalestine](https://raw.githubusercontent.com/Safouene1/support-palestine-banner/master/StandWithPalestine.svg)](https://github.com/Safouene1/support-palestine-banner/blob/master/Markdown-pages/Support.md)
+[![build](https://img.shields.io/github/actions/workflow/status/Alsanea-Ala/logmon/ci.yml?branch=main)](https://github.com/Alsanea-Ala/logmon/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/release/Alsanea-Ala/logmon)](https://github.com/Alsanea-Ala/logmon/releases/latest)
+[![license](https://img.shields.io/github/license/Alsanea-Ala/logmon)](LICENSE)
+[![go](https://img.shields.io/github/go-mod/go-version/Alsanea-Ala/logmon?label=go)](go.mod)
+[![platform](https://img.shields.io/badge/platform-linux-blue?logo=linux&logoColor=white)](https://github.com/Alsanea-Ala/logmon/releases)
 
 # Logmon
 
@@ -24,6 +29,7 @@ The current target is fewer than 50 agents on a trusted private LAN or VPN.
 
 ## Contents
 
+- [Showcase](#showcase)
 - [Features](#features)
 - [Architecture](#architecture)
 - [Project Structure](#project-structure)
@@ -37,8 +43,30 @@ The current target is fewer than 50 agents on a trusted private LAN or VPN.
 - [Behaviour When the Server Is Unavailable](#behaviour-when-the-server-is-unavailable)
 - [Troubleshooting](#troubleshooting)
 - [Limitations](#limitations)
+- [Documentation](#documentation)
 - [Contributing](#contributing)
 - [License](#license)
+
+## Showcase
+
+![The Logmon server interface: agents and files in the sidebar, log records with severity colours beside them, and an ingest graph above the records](docs/images/tui-overview.png)
+
+<details>
+<summary>More screenshots</summary>
+
+|  |  |
+|---|---|
+| **Agents panel** | **Filtering** |
+| ![The agents panel showing three agents with their state dots, hostnames, last-seen times and record counts; one agent is disconnected and shown with a hollow dot](docs/images/tui-agents-panel.png) | ![The log panel filtered to records containing "error", with the filter prompt showing the active scope and match mode](docs/images/tui-filter.png) |
+| **The agent** | **Narrow terminals** |
+| ![The agent startup screen showing the LOGMON banner and the resolved configuration](docs/images/agent-banner.png) | ![The same interface at 90 by 32, with the three panels stacked vertically](docs/images/tui-narrow.png) |
+| **Keybindings** |
+| ![The keybinding overlay listing every key and its action in two columns](docs/images/tui-help.png)  |
+
+</details>
+
+Every image here is a real capture of the real binaries against a generated
+dataset. The hostnames and log lines in it are synthetic.
 
 ## Features
 
@@ -537,6 +565,10 @@ To watch logs live, either run the server in a terminal instead, or read the
 JSONL files directly — there is no remote or HTTP viewer. See
 [Storage and TUI](#storage-and-tui).
 
+The sections above cover installing it. For upgrades, failure behaviour,
+capacity and the constraints that fail loudly, see
+[docs/user/deployment.md](docs/user/deployment.md).
+
 ## Storage and TUI
 
 The server stamps accepted records in UTC and stores them under:
@@ -978,9 +1010,10 @@ tail -f /var/lib/logmon/$(date -u +%F)/<app>/<agent-id>.jsonl
   interface.
 - Ingestion and the TUI share one process, so `--no-tui` is required for
   unattended service. There is no separate viewer process.
-- `sidePanelWidth` is only consulted on wide terminals. Below 140 columns the
-  layout switches to a fixed 32-column sidebar, because four columns do not fit
-  four panels.
+- `sidePanelWidth` is only consulted at 140 columns or wider. Between 100 and
+  139 columns the layout uses a fixed 32-column sidebar, because three panels
+  need more room than the configured share leaves them. Below 100 columns the
+  panels stack instead.
 
 ### Sources
 
@@ -996,6 +1029,24 @@ tail -f /var/lib/logmon/$(date -u +%F)/<app>/<agent-id>.jsonl
 - No durable spool, database, message broker, clustering, or multi-server
   failover.
 - No Kubernetes collector, plugin system, or collector abstraction layer.
+
+## Documentation
+
+This README is the front door: install, quickstart, deployment. Depth lives in
+[docs/](docs/README.md), split by who is reading it.
+
+| If you want to | Read |
+|---|---|
+| Configure an agent or a server | [docs/user/configuration.md](docs/user/configuration.md) |
+| Deploy it, upgrade it, or work out what broke | [docs/user/deployment.md](docs/user/deployment.md) |
+| Use the terminal interface | [docs/user/viewing-logs.md](docs/user/viewing-logs.md) |
+| Fix something that is broken | [docs/user/troubleshooting.md](docs/user/troubleshooting.md) |
+| Look up a key or a flag | [docs/reference/](docs/reference/) |
+| Understand how it works | [docs/technical/architecture.md](docs/technical/architecture.md) |
+| Work on the code | [docs/technical/](docs/technical/) and `AGENTS.md` |
+
+Each fact is written in exactly one place. If this README and `docs/` disagree,
+`docs/` is closer to the code.
 
 ## Contributing
 
@@ -1025,3 +1076,6 @@ tagged source tree in this repository at the same version tag.
 Section 13 of the license applies to operators who run a modified Logmon
 server: those users must be offered the corresponding source of the running
 version over the network.
+
+
+

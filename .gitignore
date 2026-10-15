@@ -10,3 +10,4 @@ AGENTS.md
 /agent
 .agents/
 agent-2.yaml
+tools/
