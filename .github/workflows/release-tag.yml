@@ -46,6 +46,21 @@ jobs:
           # workflow_run checks out the default branch by default, not the
           # commit that was actually tested.
           ref: ${{ github.event.workflow_run.head_sha }}
+          # Required, not cosmetic. By default checkout writes an
+          # http.<github>.extraheader holding GITHUB_TOKEN into .git/config,
+          # and that header outranks anything the remote URL carries: the push
+          # authenticates as github-actions[bot] no matter what the URL says.
+          # Reproduced against a local server that challenges for auth -- with
+          # both set, only the bot's Authorization header is ever sent, which is
+          # why an earlier attempt to fix this with `git remote set-url` pushed
+          # as the bot and still hit GH006. The push step sets its own header
+          # through GIT_CONFIG_*, and that only wins if checkout has not left
+          # one behind.
+          #
+          # Safe here because this job makes no authenticated remote calls
+          # after checkout: the tag check is a local `git rev-parse`, and the
+          # repository is public.
+          persist-credentials: false
 
       # Deliberately after the bump step, not before it: the action runs
       # git-cliff itself (there is no install-only mode on v4 -- the valid
@@ -214,36 +229,40 @@ jobs:
         if: steps.bump.outputs.version != ''
         run: git checkout -B "release/${{ steps.bump.outputs.version }}"
 
+      # Proves the secret exists and which account it acts as, before anything is
+      # pushed. If this does not print Alsanea-Ala the secret is missing,
+      # expired, or misnamed, and no amount of push configuration helps.
+      # DELETE once a release has gone green.
+      - name: whoami (TEMP, delete after first green release)
+        if: steps.bump.outputs.version != ''
+        env:
+          GH_TOKEN: ${{ secrets.ACTIONS_PUSH_TOKEN }}
+        run: gh api user -q .login
+
       - name: commit, tag, push
         if: steps.bump.outputs.version != ''
         env:
           VERSION: ${{ steps.bump.outputs.version }}
-          GH_TOKEN: ${{ secrets.ACTIONS_PUSH_TOKEN }}
           ACTIONS_PUSH_TOKEN: ${{ secrets.ACTIONS_PUSH_TOKEN }}
         run: |
           set -euo pipefail
+
+          if [ -z "${ACTIONS_PUSH_TOKEN:-}" ]; then
+            echo "ACTIONS_PUSH_TOKEN secret is missing or empty" >&2
+            exit 1
+          fi
 
           # The runner checkout has no identity configured.
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # Push as the token's owner, not as github-actions[bot].
-          #
-          # main requires a pull request, and GITHUB_TOKEN cannot bypass it:
-          # github-actions[bot] is not selectable in a ruleset bypass list, and
-          # classic branch protection has no actor picker for an app at all.
-          # An admin account does bypass, so ACTIONS_PUSH_TOKEN -- a
-          # fine-grained token belonging to one -- can.
-          #
-          # set-url is required rather than merely convenient: checkout
-          # configures an http.extraheader for GITHUB_TOKEN, and that header
-          # wins over the remote URL for origin. Leaving the URL alone means
-          # the push still authenticates as the bot and still fails GH006.
-          git remote set-url origin \
-            "https://x-access-token:${ACTIONS_PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-
           git add CHANGELOG.md
-          git commit -m "chore: $VERSION"
+          # --allow-empty, unconditional. The next bump reads this commit's
+          # subject as its range boundary, so it has to exist even when every
+          # commit in the range is filtered out of CHANGELOG.md and the file
+          # came back unchanged. Without it a future release whose range is
+          # entirely excluded would exit 1 here and never tag.
+          git commit --allow-empty -m "chore: $VERSION"
 
           # Retry/rerun safety: if the tag already points at this commit, keep
           # going; if it points elsewhere, fail rather than retagging.
@@ -265,6 +284,28 @@ jobs:
           # reached main -- an unreleasable tag with no GitHub Release behind
           # it, which is the state the v0.1.0 run got into. Under set -e a
           # failed first push exits here, before the tag exists remotely.
+
+          # Push as the token's owner, not as github-actions[bot].
+          #
+          # main requires a pull request, and GITHUB_TOKEN cannot bypass it:
+          # github-actions[bot] is not selectable in a ruleset bypass list, and
+          # classic branch protection has no actor picker for an app at all.
+          # An admin account does bypass, so ACTIONS_PUSH_TOKEN -- a
+          # fine-grained token belonging to one -- can.
+          #
+          # The header goes in through GIT_CONFIG_*, which keeps it out of
+          # .git/config, out of argv and out of ps. An earlier attempt used
+          # `git remote set-url`, which is worse twice over: the PAT lands in
+          # .git/config for the rest of the job, and it does not even change
+          # who the push authenticates as, because an extraheader left by
+          # checkout outranks the URL. checkout is now told not to write one.
+          AUTH="$(printf 'x-access-token:%s' "$ACTIONS_PUSH_TOKEN" | base64 -w0)"
+          # Actions auto-masks the raw secret but not this base64 form.
+          echo "::add-mask::$AUTH"
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0="http.https://github.com/.extraheader"
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $AUTH"
+
           git push origin HEAD:main
           git push origin "refs/tags/$VERSION"
 
