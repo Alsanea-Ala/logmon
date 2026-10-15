@@ -4,13 +4,17 @@ name: release-tag
 # ci.yml completion, including branch pushes, so the head_branch check is what
 # keeps a release off anything that is not main.
 #
-# Requires a repository setting this file cannot make: main has a
-# "changes must be made through a pull request" rule, so the push below fails
-# with GH006 unless github-actions[bot] is on the bypass list
-# (Settings -> Rules -> Bypass list), with "Do not allow bypassing the above
-# settings" unchecked. The commit being pushed only ever changes CHANGELOG.md,
-# so it is not worth a human approval per release. See CONTRIBUTING.md,
-# "Releases".
+# Requires a repository secret this file cannot create: ACTIONS_PUSH_TOKEN, a
+# fine-grained token belonging to an account with admin rights on this repo.
+#
+# main has a "changes must be made through a pull request" rule, so a push with
+# GITHUB_TOKEN fails GH006. The bypass route was tried and does not work for a
+# workflow: github-actions[bot] is not selectable in a ruleset bypass list, and
+# classic branch protection offers no actor picker for an app. An admin account
+# does bypass, so the push uses that account's token instead.
+#
+# The commit being pushed only ever changes CHANGELOG.md, which is why letting
+# it through without a review is reasonable. See CONTRIBUTING.md, "Releases".
 on:
   workflow_run:
     workflows: [ci]
@@ -210,17 +214,33 @@ jobs:
         if: steps.bump.outputs.version != ''
         run: git checkout -B "release/${{ steps.bump.outputs.version }}"
 
-      - name: commit, tag, push, dispatch
+      - name: commit, tag, push
         if: steps.bump.outputs.version != ''
         env:
           VERSION: ${{ steps.bump.outputs.version }}
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.ACTIONS_PUSH_TOKEN }}
+          ACTIONS_PUSH_TOKEN: ${{ secrets.ACTIONS_PUSH_TOKEN }}
         run: |
           set -euo pipefail
 
           # The runner checkout has no identity configured.
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Push as the token's owner, not as github-actions[bot].
+          #
+          # main requires a pull request, and GITHUB_TOKEN cannot bypass it:
+          # github-actions[bot] is not selectable in a ruleset bypass list, and
+          # classic branch protection has no actor picker for an app at all.
+          # An admin account does bypass, so ACTIONS_PUSH_TOKEN -- a
+          # fine-grained token belonging to one -- can.
+          #
+          # set-url is required rather than merely convenient: checkout
+          # configures an http.extraheader for GITHUB_TOKEN, and that header
+          # wins over the remote URL for origin. Leaving the URL alone means
+          # the push still authenticates as the bot and still fails GH006.
+          git remote set-url origin \
+            "https://x-access-token:${ACTIONS_PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
 
           git add CHANGELOG.md
           git commit -m "chore: $VERSION"
@@ -248,14 +268,18 @@ jobs:
           git push origin HEAD:main
           git push origin "refs/tags/$VERSION"
 
-          # Both refs are pushed with GITHUB_TOKEN, and GitHub suppresses
-          # workflow runs for token-created refs. Two consequences, one
-          # intended and one not:
-          #   ci.yml is skipped for this commit  -- intended, the release
-          #     commit only touches CHANGELOG.md
-          #   publish.yml is skipped for this tag  -- not intended, which is
-          #     why repository_dispatch exists here. It is one of the two
-          #     events exempt from the suppression rule.
-          gh api "repos/$GITHUB_REPOSITORY/dispatches" \
-            -f event_type=release-tagged \
-            -f "client_payload[tag]=$VERSION"
+          # No repository_dispatch here.
+          #
+          # It was needed while the push used GITHUB_TOKEN: GitHub suppresses
+          # workflow runs for refs created by the token, so the tag push fired
+          # nothing and the dispatch was the only way to reach publish.yml.
+          #
+          # The push now uses ACTIONS_PUSH_TOKEN, which is an ordinary user
+          # credential and is not suppressed. The tag push therefore triggers
+          # publish.yml directly, and dispatching on top of that would start a
+          # second goreleaser run against a release that already exists.
+          #
+          # One consequence worth knowing: ci.yml now also runs for the release
+          # commit, which it did not before. That is harmless. The release
+          # commit is "chore: vX.Y.Z", so the next bump finds it as its
+          # boundary, sees a range of nothing, and skips.

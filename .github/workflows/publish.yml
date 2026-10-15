@@ -1,17 +1,15 @@
 name: publish
 
-# Two entry points:
+# One entry point:
 #
-#   repository_dispatch  fired by release-tag.yml. Necessary, not optional:
-#     GitHub does not create a workflow run for a tag pushed with
-#     GITHUB_TOKEN, so the automated tag would otherwise publish nothing.
-#     repository_dispatch is one of the two events exempt from that rule.
-#
-#   push tags ["v*"]     so a tag pushed by hand publishes through the same
-#     pipeline without waiting for a commit on main.
+#   push tags ["v*"]     the only entry point. release-tag.yml pushes with
+#                        ACTIONS_PUSH_TOKEN, a personal token rather than
+#                        GITHUB_TOKEN, precisely because main requires a pull
+#                        request and the bot cannot bypass it. A push by a
+#                        personal token is not suppressed the way a
+#                        GITHUB_TOKEN push is, so this fires directly and no
+#                        repository_dispatch is needed to reach this workflow.
 on:
-  repository_dispatch:
-    types: [release-tagged]
   push:
     tags:
       - "v*"
@@ -20,7 +18,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: publish-${{ github.event.repository_dispatch.client_payload.tag || github.ref }}
+  group: publish-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -33,9 +31,6 @@ jobs:
           # Required. GoReleaser builds the changelog from commit history;
           # a shallow clone makes it emit nothing or fail outright.
           fetch-depth: 0
-          # repository_dispatch leaves github.ref on the default branch, so
-          # prefer the tag the dispatch carried.
-          ref: ${{ github.event.repository_dispatch.client_payload.tag || github.ref }}
 
       - uses: actions/setup-go@v7
         with:
