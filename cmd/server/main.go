@@ -17,6 +17,7 @@ type options struct {
 	dataDir        string
 	maxConnections int
 	noTUI          bool
+	guiConfig      string
 }
 
 func main() {
@@ -28,7 +29,7 @@ func main() {
 	}
 }
 
-func newCommand(run func(context.Context, server.Config, bool) error) *cobra.Command {
+func newCommand(run func(context.Context, server.Config, bool, string) error) *cobra.Command {
 	defaults := server.DefaultConfig()
 	var opts options
 	cmd := &cobra.Command{
@@ -51,7 +52,7 @@ func newCommand(run func(context.Context, server.Config, bool) error) *cobra.Com
 			if flags.Changed("max-connections") {
 				cfg.MaxConnections = opts.maxConnections
 			}
-			return run(cmd.Context(), cfg, opts.noTUI)
+			return run(cmd.Context(), cfg, opts.noTUI, opts.guiConfig)
 		},
 	}
 
@@ -61,5 +62,7 @@ func newCommand(run func(context.Context, server.Config, bool) error) *cobra.Com
 	flags.StringVar(&opts.dataDir, "data-dir", defaults.DataDir, "log storage directory")
 	flags.IntVar(&opts.maxConnections, "max-connections", defaults.MaxConnections, "maximum simultaneous agent connections")
 	flags.BoolVar(&opts.noTUI, "no-tui", false, "run without TUI (headless)")
+	flags.StringVar(&opts.guiConfig, "gui-config", server.DefaultGUIConfigPath(),
+		"YAML config path for TUI appearance; an empty value disables it")
 	return cmd
 }

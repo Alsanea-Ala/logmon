@@ -575,6 +575,45 @@ startup or `r`.
 `/` filters only those loaded records. It is not a search across stored data,
 and there is no pagination.
 
+## Appearance
+
+The TUI reads an optional config file, by default
+`~/.config/logmon/config.yml`. Point `--gui-config` elsewhere, or pass an empty
+value to switch it off.
+
+```yaml
+gui:
+  border: rounded          # rounded | single | double | hidden
+  sidePanelWidth: 0.333    # share of the terminal width, clamped to 0.2-0.6
+  graph: true              # ingest graph on by default
+  wrap: false              # wrap long log lines on by default
+  theme:
+    borderActive: green
+    borderInactive: white
+    selectedBg: blue
+    accent: brightblue
+    err: red
+```
+
+Every field is optional and keeps its default when omitted, so a file setting
+only a border is valid.
+
+Colours accept a name (`red`, `brightgreen`, …), a 256-colour index (`46`), or
+`#rrggbb`. The numeric form exists because the built-in palette is expressed as
+indices and the config should not be a downgrade.
+
+Parsing is strict: an unknown key or an unknown colour or border name is
+rejected, and the server starts on defaults with a visible `GUI config` line in
+the log panel. A silently ignored typo is the failure that costs an afternoon.
+
+`r` re-reads the file, so editing the appearance and pressing `r` is the whole
+workflow. It also resets `g` and `w` to whatever the file says: the file wins,
+always, which is one rule rather than two.
+
+`border: hidden` removes the frames and the panel titles with them. It frees two
+rows in every panel and four columns of width, which is why the graph becomes
+visible at heights where it was previously hidden.
+
 ## Navigation
 
 Three panels, and `tab` and `shift+tab` are the only keys that move between
@@ -790,6 +829,9 @@ tail -f /var/lib/logmon/$(date -u +%F)/<app>/<agent-id>.jsonl
   interface.
 - Ingestion and the TUI share one process, so `--no-tui` is required for
   unattended service. There is no separate viewer process.
+- `sidePanelWidth` is only consulted on wide terminals. Below 140 columns the
+  layout switches to a fixed 32-column sidebar, because four columns do not fit
+  four panels.
 
 ### Sources
 

@@ -160,7 +160,7 @@ func (m *model) computeLayout() layout {
 
 	switch {
 	case w >= breakpointWide:
-		return side(w / 3)
+		return side(int(float64(w) * m.sidePanelRatio))
 	case w >= breakpointMedium:
 		return side(32)
 	}
@@ -435,6 +435,12 @@ type model struct {
 	borderStyle lipgloss.Border
 	showHelp    bool
 
+	// GUI config, see guiconfig.go. sidePanelRatio is the resolved, clamped
+	// share of the terminal width the sidebar takes.
+	sidePanelRatio float64
+	guiConfigPath  string
+	guiErr         error
+
 	// Ingest graph. graphPending counts records since the last tick and is
 	// folded into the ring on the next tickMsg.
 	//
@@ -467,6 +473,8 @@ func newModel(dataDir string) *model {
 		// the operator never asked for.
 		windowIndex: windowIndexAll,
 		now:         time.Now,
+
+		sidePanelRatio: defaultSideRatio,
 	}
 }
 
@@ -723,6 +731,10 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleEnter()
 
 	case "r":
+		// The file is re-read alongside the storage rescan. It is the only
+		// reload path, so editing a border or a colour and pressing r is the
+		// whole workflow. It also resets g and w to what the file says.
+		m.reloadGUI()
 		return m, m.scan()
 
 	case "g":
@@ -1338,8 +1350,8 @@ func windowAround(rows int, cursor, budget int) (int, int) {
 // renderAgents draws the agents panel: one row per agent, its connection state
 // and hostname.
 func (m *model) renderAgents(width, height int) string {
-	innerWidth := max(1, width-textWidth)
-	rowBudget := max(1, height-chromeHeight)
+	innerWidth := m.bodyWidth(width)
+	rowBudget := max(1, height-m.panelChromeV())
 
 	ids := m.sortedAgentIDs()
 	start, end := windowAround(len(ids), m.agentIndex, rowBudget)
@@ -1525,8 +1537,8 @@ func padRight(s string, width int) string {
 // disk.
 func (m *model) renderFiles(width, height int) string {
 	st := m.p.styles()
-	innerWidth := max(1, width-textWidth)
-	rowBudget := max(1, height-chromeHeight)
+	innerWidth := m.bodyWidth(width)
+	rowBudget := max(1, height-m.panelChromeV())
 
 	start, end := windowAround(len(m.treeFlattened), m.treeIndex, rowBudget)
 
@@ -1674,7 +1686,7 @@ var graphGlyphs = []string{" ", "▁", "▂", "▃", "▄", "▅", "▆", "█"}
 // the log panel has four interior rows, so drawing the graph unconditionally
 // would leave the log panel with a single line and no way to see why.
 func (m *model) graphVisible(height int) bool {
-	return m.graphEnabled && height-chromeHeight >= graphMinRows
+	return m.graphEnabled && height-m.panelChromeV() >= graphMinRows
 }
 
 // graphRows renders the series, one per line, each a label, a bar and the peak
@@ -1951,10 +1963,7 @@ func pushBucket(counts []int, value int) []int {
 func (m *model) renderMain(width, height int) string {
 	st := m.p.severityStyles()
 
-	innerWidth := width - textWidth
-	if innerWidth < 1 {
-		innerWidth = 1
-	}
+	innerWidth := m.bodyWidth(width)
 
 	// Header block: path, optional category, divider. Rows are accumulated in
 	// a slice and joined without a trailing newline, which would otherwise
@@ -1986,7 +1995,9 @@ func (m *model) renderMain(width, height int) string {
 	}
 
 	// Rows left for records once the border and header block are accounted for.
-	textRows := height - chromeHeight - chrome
+	// The border term is the model's, not the constant's: a frameless panel
+	// costs no rows and has two more to give.
+	textRows := height - m.panelChromeV() - chrome
 
 	records := m.filtered()
 	if len(records) == 0 {
@@ -2056,6 +2067,11 @@ func (m *model) renderMain(width, height int) string {
 
 	if m.err != nil {
 		rows = append(rows, st.error.Render("Error: "+m.err.Error()))
+	}
+	if m.guiErr != nil {
+		// The config did not apply and the panel is running on defaults.
+		// Saying so beats starting up in the wrong colours with no clue why.
+		rows = append(rows, st.error.Render("GUI config: "+m.guiErr.Error()))
 	}
 
 	return panel(panelTitle(focusMain), strings.Join(rows, "\n"), width, height, m.borderStyle, m.focus == focusMain, m.p)

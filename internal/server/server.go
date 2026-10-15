@@ -107,7 +107,11 @@ func (cfg Config) Validate() error {
 	return nil
 }
 
-func Run(ctx context.Context, cfg Config, noTUI bool) error {
+// DefaultGUIConfigPath is the config location used when --gui-config is not
+// given. Exported so the flag default and the loader cannot drift apart.
+func DefaultGUIConfigPath() string { return defaultGUIConfigPath() }
+
+func Run(ctx context.Context, cfg Config, noTUI bool, guiConfigPath string) error {
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
@@ -162,6 +166,7 @@ func Run(ctx context.Context, cfg Config, noTUI bool) error {
 
 	// TUI mode
 	model := newModel(cfg.DataDir)
+	model.loadGUI(guiConfigPath)
 	program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithoutSignalHandler())
 	run.program = program
 	go func() {
