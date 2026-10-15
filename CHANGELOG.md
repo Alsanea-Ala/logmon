@@ -10,6 +10,31 @@ every release. Edit the header above by hand; edit nothing below the marker.
 -->
 
 <!-- git-cliff: end of header -->
+## [0.2.0] - 2026-10-15
+
+### Features
+
+- *(server)* Titled panels, a palette, and a working help overlay
+- *(server)* Split the sidebar into separate agents and files panels
+- *(server)* Colour log lines by severity
+- *(tui)* Ingest graph
+- *(tui)* A text filter that filters, and line wrapping
+- *(tui)* Last-seen and record count on the agents panel
+- *(tui)* One key per meaning, and numbered panels
+- *(tui)* A log time window on `t`
+- *(tui)* A GUI config file
+- *(tui)* Size the panels by content and give the focused one two thirds
+- *(server)* Carry the source's stated severity on the wire
+- *(tui)* Click and wheel, off by default
+
+### Bug Fixes
+
+- *(tui)* The selection row was illegible on a themed terminal
+- *(ci)* Install the pre-commit hook and pin the lint toolchain
+- *(release)* Nfpm filename template is file_name_template in v2
+- *(release)* Extra_files never matched a raw binary
+- *(ci)* Anchor the release range on the last tag, not the last bump commit
+
 ## [0.1.1] - 2026-10-15
 
 ### Bug Fixes
