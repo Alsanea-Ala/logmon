@@ -86,6 +86,106 @@ const (
 // title: two border rows and one of content.
 const panelMinRows = 3
 
+// The focused panel takes two thirds of the contested height.
+//
+// Integer arithmetic rather than a float comparison: the rounding is then
+// explicit and testable, and 0.666 in a layout calculation is how a panel ends
+// up one row short of the share it was promised.
+const (
+	focusNum = 2
+	focusDen = 3
+)
+
+// rebalanceMin is the available height below which the stacked layout keeps the
+// plain split instead of giving the focused panel two thirds.
+//
+// It sits where the two approaches cross. Above it, giving the focused panel
+// two thirds costs the other panels only rows they can spare. Below it, the
+// split takes rows from the log panel to hand to the tree, and a layout that
+// reshuffles on every focus change to reach a worse result is not worth having.
+//
+// TestNarrowLayoutGivesLogsRoom covers the sizes under this line.
+const rebalanceMin = 30
+
+// focusShareRows is two thirds of avail, rounded up, so a panel never lands a
+// row under the share it was promised.
+func focusShareRows(avail int) int {
+	return (avail*focusNum + focusDen - 1) / focusDen
+}
+
+// panelRows is the height a panel needs to show contentRows of content: its
+// border, the rows themselves, and one row of slack so a full panel does not
+// look like it is clipping the last line.
+func (m *model) panelRows(contentRows int) int {
+	chrome := 0
+	if m.framed() {
+		chrome = chromeHeight
+	}
+	return max(panelMinRows, chrome+contentRows+1)
+}
+
+// shareHeight divides available height between one focused panel and two
+// others, in three steps:
+//
+//  1. The focused panel takes at least two thirds, unless the other two cannot
+//     live on what would be left.
+//  2. The others split the remainder in proportion to what they need, each
+//     floored at panelMinRows.
+//  3. Whatever they did not need comes back as surplus, for the caller to place.
+//
+// Step 3 is separate from the focused panel on purpose. Routing the surplus to
+// whichever panel is focused looks generous and is the opposite: at 80x80 with
+// the agents panel focused it handed sixty-four rows to a list of one, which is
+// precisely the dead space this layout exists to remove, just in a different
+// panel. Only the log panel has content that grows to fill any height it is
+// given, so the caller sends the surplus there.
+//
+// Step 1's exception matters too: a log panel is never so small that the file
+// header alone fills it, so the two thirds yields when the other two genuinely
+// need their content.
+func shareHeight(avail, focusNeed, needA, needB int, bIsLogs bool) (focusH, aH, bH, surplus int) {
+	share := focusShareRows(avail)
+
+	// The others get their content when it fits beside the share, which can mean
+	// the focused panel gives rows back. When it does not fit, the focused panel
+	// keeps the share and the others clip: a tree with two hundred rows does not
+	// become more readable by taking the log panel's rows to get them.
+	focusH = share
+	if needA+needB <= avail-share {
+		focusH = min(share, avail-(needA+needB))
+	}
+
+	// focusNeed is a floor and never a demand. A panel whose content is larger
+	// than the terminal scrolls, so requiring the rows it would need to show
+	// everything at once is what breaks the layout: 200 agents focused at 80x80
+	// asked for 203 rows and the other two came back negative.
+	focusH = min(max(focusH, focusNeed), max(0, avail-panelMinRows*2))
+
+	// Serve each panel its content and keep whatever is left over. The log panel
+	// goes first when it is one of the two, because its content is unbounded:
+	// height handed to it is never blank rows, whereas a log panel cut to its
+	// border and the file header shows no records at all and reads as broken
+	// rather than compact.
+	rest := max(0, avail-focusH)
+	switch {
+	case bIsLogs:
+		bH = min(needB, rest)
+		aH = min(needA, rest-bH)
+	case needA <= needB:
+		aH = min(needA, rest)
+		bH = min(needB, rest-aH)
+	default:
+		// Neither is the log panel, so the smaller need is served first. At
+		// 80x80 with forty agents and the logs focused, serving the agent list
+		// first left the file tree at zero rows, and a panel with no height is
+		// worse than a panel that scrolls.
+		bH = min(needB, rest)
+		aH = min(needA, rest-bH)
+	}
+
+	return focusH, aH, bH, rest - aH - bH
+}
+
 // layout describes panel geometry for one frame.
 //
 // The sidebar is two panels, not one: agents on top, the file tree below. They
@@ -103,17 +203,20 @@ type layout struct {
 // splitSidebar divides the sidebar height between the agents panel and the file
 // tree.
 //
-// The agents panel grows to fit its own rows, capped at half the sidebar so the
-// file tree is never squeezed out by a long agent list. Both keep the minimum
-// rows needed to render a title at all.
-func splitSidebar(sidebarH, agentCount int) (agentsH, filesH int) {
+// The agents panel grows to fit its own rows, capped at half the sidebar so a
+// long agent list cannot squeeze the tree out. The tree takes the remainder,
+// which is what fills the column when nothing is competing for it.
+//
+// The tree taking the remainder is deliberate rather than a leftover. In the
+// side-by-side layout the sidebar has no competitor: the log panel already owns
+// the full height. Stretching the agents panel instead would fill the column
+// with blanks just as effectively, in a panel where blanks are more confusing
+// because the list is expected to be short.
+func (m *model) splitSidebar(sidebarH, agentCount, treeRows int) (agentsH, filesH int) {
 	if sidebarH < panelMinRows*2 {
 		sidebarH = panelMinRows * 2
 	}
-	agentsH = min(2+agentCount+1, max(panelMinRows, sidebarH/2))
-	if agentsH < panelMinRows {
-		agentsH = panelMinRows
-	}
+	agentsH = max(panelMinRows, min(m.panelRows(agentCount), max(panelMinRows, sidebarH/2)))
 	filesH = sidebarH - agentsH
 	if filesH < panelMinRows {
 		filesH = panelMinRows
@@ -147,7 +250,7 @@ func (m *model) computeLayout() layout {
 		if sw < 1 {
 			sw = 1
 		}
-		agentsH, filesH := splitSidebar(availH, len(m.agents))
+		agentsH, filesH := m.splitSidebar(availH, len(m.agents), len(m.treeFlattened))
 		return layout{
 			stacked:  false,
 			sidebarW: sw,
@@ -165,21 +268,80 @@ func (m *model) computeLayout() layout {
 		return side(32)
 	}
 
-	// Narrow: all three panels stack, and the logs get at least half the
-	// available height.
+	// Narrow: all three panels stack, and here they genuinely compete for the
+	// same rows, so the focused panel takes two thirds of what it needs plus
+	// two thirds of the height.
 	//
-	// Reserving for the logs first, rather than splitting the sidebar and
-	// handing the remainder down, is what keeps the log panel readable. At
-	// 80x18 the sidebar-first split left the logs three rows: two of border
-	// and one holding the file header, so no log line was visible at all.
-	mainH := max(panelMinRows*2, availH/2)
-	agentsH, filesH := splitSidebar(availH-mainH, len(m.agents))
-	if agentsH+filesH+mainH > availH {
-		// splitSidebar enforces a floor on both sidebar panels, which can
-		// exceed the space available. The logs give up the difference.
-		overflow := agentsH + filesH + mainH - availH
-		if overflow < mainH {
-			mainH -= overflow
+	// Below rebalanceMin the plain split is kept. It is the right answer at
+	// those heights and rebalancing there would resize the panels on every
+	// focus change to reach a worse one.
+	needAgents := m.panelRows(len(m.agents))
+	needFiles := m.panelRows(len(m.treeFlattened))
+	needMain := panelMinRows * 2 // border, graph, file header and little else
+
+	if availH < rebalanceMin {
+		// Reserving for the logs first, rather than splitting the sidebar and
+		// handing the remainder down, is what keeps the log panel readable. At
+		// 80x18 the sidebar-first split left the logs three rows: two of border
+		// and one holding the file header, so no log line was visible at all.
+		mainH := max(panelMinRows*2, availH/2)
+		agentsH, filesH := m.splitSidebar(availH-mainH, len(m.agents), len(m.treeFlattened))
+		if agentsH+filesH+mainH > availH {
+			// splitSidebar enforces a floor on both sidebar panels, which can
+			// exceed the space available. The logs give up the difference.
+			overflow := agentsH + filesH + mainH - availH
+			if overflow < mainH {
+				mainH -= overflow
+			}
+		}
+		return layout{stacked: true, sidebarW: w, agentsH: agentsH, filesH: filesH, mainW: w, mainH: mainH}
+	}
+
+	// The focused panel is whichever one the operator is in. shareHeight works
+	// in terms of "the focused panel and the other two", so the arguments move
+	// with the focus rather than the layout code branching per pane.
+	focusNeed, otherA, otherB := needMain, needAgents, needFiles
+	switch m.focus {
+	case focusAgents:
+		focusNeed, otherA, otherB = needAgents, needFiles, needMain
+	case focusFiles:
+		focusNeed, otherA, otherB = needFiles, needAgents, needMain
+	}
+	// bH is the log panel whenever a sidebar panel is focused; when the logs
+	// are focused themselves, both others are sidebar panels and the surplus is
+	// routed to the logs at the end anyway.
+	bIsLogs := m.focus != focusMain
+	focusH, aH, bH, surplus := shareHeight(availH, focusNeed, otherA, otherB, bIsLogs)
+
+	// Map the three results onto the three panels. The otherA/otherB order above
+	// is what this switch depends on: for each focus, aH is always the agents
+	// or files panel and bH is always the log panel, except when the log panel
+	// is itself the focused one.
+	var agentsH, filesH, mainH int
+	switch m.focus {
+	case focusAgents:
+		agentsH, filesH, mainH = focusH, aH, bH
+	case focusFiles:
+		agentsH, filesH, mainH = aH, focusH, bH
+	default:
+		agentsH, filesH, mainH = aH, bH, focusH
+	}
+	// The surplus goes to the log panel whichever one is focused. It is the only
+	// panel whose content grows to fill any height it is given; the agent list
+	// and the file tree are both bounded by what exists, so height handed to
+	// either of them is blank rows. See shareHeight.
+	mainH += surplus
+
+	// shareHeight floors both others at panelMinRows, which can exceed the
+	// space available. The focused panel gives up the difference rather than
+	// letting the frame overflow the terminal.
+	if overflow := agentsH + filesH + mainH - availH; overflow > 0 {
+		give := min(overflow, max(0, mainH-panelMinRows))
+		mainH -= give
+		overflow -= give
+		if overflow > 0 {
+			agentsH -= min(overflow, max(0, agentsH-panelMinRows))
+			filesH -= min(overflow, max(0, filesH-panelMinRows))
 		}
 	}
 	return layout{stacked: true, sidebarW: w, agentsH: agentsH, filesH: filesH, mainW: w, mainH: mainH}

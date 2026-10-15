@@ -657,6 +657,48 @@ than a key that silently moves you somewhere else.
 Panel titles carry their number, `[1] Agents`, so the digit shortcuts are
 discoverable without reading the help overlay.
 
+### Panel Sizing
+
+On a wide terminal (100 columns or more) the layout is side-by-side: the sidebar
+takes a third of the width and the log panel owns the full height. There is
+nothing for the sidebar panels to compete for, so they are sized by their
+contents — the agent list grows to fit its rows, and the file tree takes the
+rest of the column.
+
+Below 100 columns the three panels stack and genuinely compete for the same
+rows, so focus decides the split:
+
+```text
+1. the focused panel takes at least two thirds of the height
+2. the other two share the rest, sized by their contents
+3. whatever they did not need goes to the log panel
+```
+
+Two thirds is a floor, not a target. A file tree with seven rows does not need
+the twenty-six rows its share would give it at 80x80, and the honest use of
+those rows is the log panel, whose content grows to fill any height it is given.
+The agent list and the file tree are both bounded by what exists, so height
+handed to either of them is blank rows.
+
+In practice at 80x80, with a three-agent list and a five-row tree:
+
+| Focus | Agents | Files | Logs | Before |
+|---|---|---|---|---|
+| Logs | 5 | 8 | 65 | 4 / 35 / 39 |
+| Files | 5 | 52 | 21 | 4 / 35 / 39 |
+| Agents | 52 | 8 | 18 | 4 / 35 / 39 |
+
+The trade is that focusing a sidebar panel hands it two thirds of the height
+even when its content is short, which is blank rows until more content arrives.
+That is inherent to the rule; the alternative is capping bounded panels at their
+contents, and then focus would do nothing except on the log panel, which is
+already the largest.
+
+Below 30 rows of available height the plain 50/50 split is kept and focus does
+not move the panels. There is no surplus to redistribute at those sizes, so
+rebalancing would resize the stack on every `tab` to reach a worse result. This
+is the same guard `TestNarrowLayoutGivesLogsRoom` covers.
+
 ## Filtering
 
 The filter narrows the panel as you type. Both halves of the query are shown in

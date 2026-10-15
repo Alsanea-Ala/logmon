@@ -82,7 +82,7 @@ func TestPanelTitlesRendered(t *testing.T) {
 // Width alone would not catch it, since lipgloss pads the block out again.
 func TestPanelFrameAligns(t *testing.T) {
 	m := testModel(t, 100, 20)
-	agentsH, filesH := splitSidebar(18, len(m.agents))
+	agentsH, filesH := m.splitSidebar(18, len(m.agents), len(m.treeFlattened))
 	for _, line := range strings.Split(m.renderAgents(30, agentsH), "\n") {
 		if w := lipglossWidth(line); w != 30 {
 			t.Errorf("agents row width = %d, want 30: %q", w, line)
