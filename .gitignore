@@ -4,6 +4,7 @@
 !examples/*.yaml
 bin/
 data/
+dist/
 tmp
 /server
 AGENTS.md
