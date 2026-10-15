@@ -1238,33 +1238,187 @@ func windowAround(rows int, cursor, budget int) (int, int) {
 // renderAgents draws the agents panel: one row per agent, its connection state
 // and hostname.
 func (m *model) renderAgents(width, height int) string {
-	st := m.p.styles()
 	innerWidth := max(1, width-textWidth)
 	rowBudget := max(1, height-chromeHeight)
 
 	ids := m.sortedAgentIDs()
 	start, end := windowAround(len(ids), m.agentIndex, rowBudget)
 
+	rows := m.agentRows(ids, innerWidth)
 	lines := make([]string, 0, rowBudget)
 	if len(ids) == 0 {
 		lines = append(lines, "  (none \u2014 start an agent)")
 	}
 	for i := start; i < end; i++ {
-		agent := m.agents[ids[i]]
-		state, stateStyle := "\u25cf", st.connected
-		if !agent.Connected {
-			state, stateStyle = "\u25cb", st.offline
+		if i < len(rows) {
+			lines = append(lines, rows[i])
 		}
-		plain := fmt.Sprintf("%s %s %s", state, agent.ID, safeText(agent.Hostname))
-		if m.focus == focusAgents && i == m.agentIndex {
-			lines = append(lines, st.selected.Width(innerWidth).Render(truncateText(plain, innerWidth)))
-			continue
-		}
-		lines = append(lines, stateStyle.Render(state)+" "+truncateText(
-			fmt.Sprintf("%s %s", agent.ID, safeText(agent.Hostname)), max(1, innerWidth-2)))
 	}
 
 	return panel("Agents", strings.Join(lines, "\n"), width, height, m.borderStyle, m.focus == focusAgents, m.p)
+}
+
+// agentRows lays out one row per agent, dropping optional columns until the
+// row fits.
+//
+// Columns are given up in order of how little they carry. The record count goes
+// first because it is the easiest to recompute; last-seen goes next; the
+// hostname goes last, because a hostname is how an operator recognises their
+// own machine. The ID is never dropped, because it is the identity and on a
+// panel narrowed to the sidebar minimum there has to be something left that
+// says which agent this is.
+//
+// Relative times are rendered here rather than stored. LastSeen updates on
+// every record, so a stored duration is stale the moment it is computed, and
+// the graph of ages only gets more wrong the longer the session runs.
+func (m *model) agentRows(ids []string, innerWidth int) []string {
+	now := time.Now()
+	counts := m.agentRecordCounts()
+
+	// Widest value in each column, so the rows line up rather than ragged.
+	idW, hostW, seenW, countW := 1, 1, 1, 1
+	seen := make(map[string]string, len(ids))
+	for _, id := range ids {
+		agent := m.agents[id]
+		seen[id] = relativeTime(agent.LastSeen, now)
+		idW = max(idW, lipgloss.Width(agent.ID))
+		hostW = max(hostW, lipgloss.Width(safeText(agent.Hostname)))
+		seenW = max(seenW, lipgloss.Width(seen[id]))
+		countW = max(countW, lipgloss.Width(formatCount(counts[id])))
+	}
+
+	// The state dot, a space, and the agent ID are never dropped.
+	fixed := 2 + idW
+	keepHost, keepSeen, keepCount := true, true, true
+	for {
+		total := fixed
+		if keepHost {
+			total += 1 + hostW
+		}
+		if keepSeen {
+			total += 1 + seenW
+		}
+		if keepCount {
+			total += 1 + countW
+		}
+		if total <= innerWidth {
+			break
+		}
+		// Give up the least informative column still present. Only the host is
+		// ever the last one standing, so the loop terminates on it.
+		switch {
+		case keepCount:
+			keepCount = false
+		case keepSeen:
+			keepSeen = false
+		case keepHost:
+			keepHost = false
+		default:
+			keepHost = false
+		}
+		if !keepCount && !keepSeen && !keepHost {
+			break
+		}
+	}
+
+	styles := m.p.styles()
+	rows := make([]string, 0, len(ids))
+	for i, id := range ids {
+		agent := m.agents[id]
+		dot, dotStyle := "\u25cf", styles.connected
+		if !agent.Connected {
+			dot, dotStyle = "\u25cb", styles.offline
+		}
+
+		rest := padRight(agent.ID, idW)
+		if keepHost {
+			rest += " " + padRight(safeText(agent.Hostname), hostW)
+		}
+		if keepSeen {
+			rest += " " + padRight(seen[id], seenW)
+		}
+		if keepCount {
+			rest += " " + padRight(formatCount(counts[id]), countW)
+		}
+		// Two columns are the state dot and the space after it. Truncating to
+		// the remaining width rather than to innerWidth keeps the row inside the
+		// panel once the dot is put back.
+		rest = truncateText(rest, max(1, innerWidth-2))
+
+		if m.focus == focusAgents && i == m.agentIndex {
+			rows = append(rows, styles.selected.Width(innerWidth).Render(dot+" "+rest))
+			continue
+		}
+		// Only the dot is coloured. The rest of the row is data, and a row that
+		// is mostly foreground colour is harder to scan, not easier.
+		rows = append(rows, dotStyle.Render(dot)+" "+rest)
+	}
+	return rows
+}
+
+// agentRecordCounts is how many records each agent has in the filtered set.
+//
+// Counted from filtered() rather than kept as a running total, so the column
+// agrees with the panel above it. A stored total would have to be updated on
+// every record and would disagree with whatever filter is active, which is
+// worse than being a little expensive.
+func (m *model) agentRecordCounts() map[string]int {
+	counts := make(map[string]int, len(m.agents))
+	for _, record := range m.filtered() {
+		counts[record.AgentID]++
+	}
+	return counts
+}
+
+// relativeTime renders how long ago t was, at a resolution a human reads.
+//
+// A zero time is "never" rather than a large number of days. agentStatus is
+// only populated once an agent has been seen, and rendering the zero time as a
+// duration produces an absurd 20000-day age for an agent that has simply never
+// connected.
+func relativeTime(t, now time.Time) string {
+	if t.IsZero() {
+		return "never"
+	}
+	since := now.Sub(t)
+	if since < 0 {
+		since = 0
+	}
+	switch {
+	case since < time.Second:
+		return "now"
+	case since < time.Minute:
+		return strconv.Itoa(int(since/time.Second)) + "s ago"
+	case since < time.Hour:
+		return strconv.Itoa(int(since/time.Minute)) + "m ago"
+	case since < 24*time.Hour:
+		return strconv.Itoa(int(since/time.Hour)) + "h ago"
+	default:
+		return strconv.Itoa(int(since/(24*time.Hour))) + "d ago"
+	}
+}
+
+// formatCount is thousands-separated so a column of counts lines up by eye.
+func formatCount(n int) string {
+	digits := strconv.Itoa(n)
+	if len(digits) <= 3 {
+		return digits
+	}
+	var b strings.Builder
+	for i, r := range digits {
+		if i > 0 && (len(digits)-i)%3 == 0 {
+			b.WriteByte(',')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+func padRight(s string, width int) string {
+	if gap := width - lipgloss.Width(s); gap > 0 {
+		return s + strings.Repeat(" ", gap)
+	}
+	return s
 }
 
 // renderFiles draws the file tree panel: dates, apps and agents, as stored on
