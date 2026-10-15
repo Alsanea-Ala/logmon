@@ -96,7 +96,17 @@ nfpms:
     # logmon-agent_linux_amd64: it is the filename stem here, but it is also
     # what the package installs as under bindir, and that is the name a user
     # types. Only the asset filename changes.
-    name_template: "{{ .PackageName }}_{{ .Os }}_{{ .Arch }}_{{ .Version }}"
+    file_name_template: "{{ .PackageName }}_{{ .Os }}_{{ .Arch }}_{{ .Version }}"
+    # `file_name_template`, not `name_template`. GoReleaser v2 renamed the nfpm
+    # field, and a v1 `name_template` is a hard unmarshal error rather than a
+    # warning, so the release dies at config parse before a single binary is
+    # built. v0.2.0 carried the v1 name: the tag exists and the GitHub release
+    # does not. TestNFPMDoesNotUseTheV1FilenameField in internal/ci fails on it
+    # now, before a tag is ever cut.
+    #
+    # The `name_template` referenced above is archives', which is unchanged in
+    # v2. Only nfpm was renamed.
+    #
     # `bindir` is a single string, and already defaults to /usr/bin.
     bindir: /usr/bin
     # No `contents`. GoReleaser adds the binaries itself, and it installs
@@ -117,7 +127,7 @@ nfpms:
     formats:
       - deb
       - rpm
-    name_template: "{{ .PackageName }}_{{ .Os }}_{{ .Arch }}_{{ .Version }}"
+    file_name_template: "{{ .PackageName }}_{{ .Os }}_{{ .Arch }}_{{ .Version }}"
     bindir: /usr/bin
 
 checksum:
