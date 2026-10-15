@@ -160,21 +160,34 @@ release:
   prerelease: auto
   # The raw executables, as assets in their own right.
   #
-  # GoReleaser already builds them into dist/, but only uploads archives and
-  # packages. A user who wanted one binary had to unpack a tarball first, which
-  # is the wrong shape for scp-ing logmon-server onto a box that does not speak
-  # dpkg.
+  # GoReleaser builds them, but only uploads archives and packages. A user who
+  # wanted one binary had to unpack a tarball first, which is the wrong shape
+  # for scp-ing logmon-server onto a box that does not speak dpkg.
   #
-  # Additive on purpose: nothing existing is renamed or removed, so if
-  # extra_files turns out to misbehave the release still ships its archives and
-  # packages. Four more assets and roughly 10 MB of bytes that are also inside
-  # the tarballs, which is the trade for not making anyone unpack anything.
+  # The globs are per build id and reach into the per-target subdirectory.
+  # GoReleaser does NOT put the raw binary at the dist/ root:
   #
-  # The globs are per build id. A single ./dist/logmon-* glob would match both
-  # binaries under both name_templates and produce four copies of each, so the
-  # two entries stay separate.
+  #   dist/agent_linux_amd64_v1/logmon-agent_linux_amd64
+  #   dist/server_linux_arm64_v1/logmon-server_linux_amd64
+  #
+  # The directory is named after the build id, not after `binary`. A
+  # ./dist/logmon-agent_* glob matches none of that -- it matches the eight
+  # archives and packages built from the same binary, which GoReleaser already
+  # uploads, and the release dies with "glob matches multiple files". That is
+  # what every release through v0.1.2 did.
+  #
+  # Each glob matches two files -- one per architecture -- and their names
+  # differ, so nothing collides. What matters is that a match is always an
+  # extensionless binary and never an archive or package.
+  # TestExtraFilesGlobsMatchOnlyRawBinaries holds that line.
+  # Verified against a real dist/ built by
+  # `goreleaser release --clean --skip=publish,validate`: 18 artifacts,
+  # 4 of type Binary, no duplicate names.
+  #
+  # No name_template. The binary is already correctly named, and extra_files
+  # has no template variable carrying the matched path, so a template could
+  # only strip the version, not add it. The assets are versionless by
+  # construction; the archives carry the version.
   extra_files:
-    - glob: ./dist/logmon-agent_*
-      name_template: "logmon-agent_{{ .Os }}_{{ .Arch }}"
-    - glob: ./dist/logmon-server_*
-      name_template: "logmon-server_{{ .Os }}_{{ .Arch }}"
+    - glob: ./dist/agent_*/logmon-agent_*
+    - glob: ./dist/server_*/logmon-server_*
