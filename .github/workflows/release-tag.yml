@@ -76,19 +76,23 @@ jobs:
           set -euo pipefail
 
           # ---- range --------------------------------------------------
-          # The previous release commit is the boundary. Its subject is
-          # exactly "chore: vX.Y.Z", so match that and nothing looser.
+          # The boundary is the last tag, not the last bump commit.
           #
-          # With no previous release, every commit is in range. That is an
-          # absent range argument, not a root-based one: the root commit has
-          # no parent, so "<root>^..HEAD" is not a valid revision and fails
-          # the whole job on exactly the run that most needs to work.
-          # grep -m1 rather than `| head -1`: head exits at the first line and
-          # SIGPIPEs grep, which pipefail reports as failure.
-          LAST=$(git log --format='%H %s' \
-            | grep -m1 -E '^[0-9a-f]{40} chore: v[0-9]+\.[0-9]+\.[0-9]+$' \
-            | cut -d' ' -f1 || true)
-          RANGE=${LAST:+"$LAST^..HEAD"}
+          # Those are different facts. A `chore: vX.Y.Z` commit means a release
+          # was decided; a tag means it landed. A publish that fails after the
+          # bump commit is pushed leaves the first without the second, and
+          # anchoring on the commit then counts an abandoned release as a
+          # completed one. Every feature before it falls outside the range, so
+          # the next run sees one fix and ships a patch. That is how twelve
+          # features went out as v0.1.2 while the changelog, built from a tag
+          # range, listed all twelve under it.
+          #
+          # Anchoring on the tag also makes disagreement with the version base
+          # below impossible. That base already read git describe, so the two
+          # were computing from different histories and could only agree by
+          # luck. One lookup, used twice.
+          LAST=$(git describe --tags --abbrev=0 2>/dev/null || true)
+          RANGE=${LAST:+"$LAST..HEAD"}
           echo "range: ${RANGE:-all commits on this branch}"
 
           # ---- one snapshot of the subjects ---------------------------
@@ -168,10 +172,24 @@ jobs:
           # The first release is v0.1.0 whatever the history says; applying
           # the rules to it would derive v0.2.0 from a 0.1.0 base that never
           # existed.
-          if [ -z "$LAST" ] && [ -z "$(git tag -l 'v*')" ]; then
-            VERSION=v0.1.0
+          #
+          # $LAST is the base, not a fresh git describe. Re-running the lookup
+          # here is what let the boundary and the base disagree in the first
+          # place; two calls to the same command can return different answers
+          # if the repository moves between them.
+          if [ -z "$LAST" ]; then
+            if [ -z "$(git tag -l 'v*')" ]; then
+              VERSION=v0.1.0
+            else
+              # Tags exist but none is reachable from HEAD. Reading an empty
+              # base would yield "v.." and then a version nobody asked for, so
+              # stop and say why.
+              echo "tags exist but none is reachable from HEAD; cannot pick a base" >&2
+              git tag -l 'v*' | sed 's/^/  dangling: /' >&2
+              exit 1
+            fi
           else
-            BASE=$(git describe --tags --abbrev=0 | sed 's/^v//')
+            BASE=${LAST#v}
             IFS=. read -r MAJ MI PA <<<"$BASE"
             case "$BUMP" in
               major) MAJ=$((MAJ+1)); MI=0; PA=0 ;;
