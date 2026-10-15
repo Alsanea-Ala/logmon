@@ -590,12 +590,12 @@ there is no web interface and no way to attach from another machine.
 | `↑` / `↓` or `k` / `j` | Select log line |
 | `←` / `→` or `h` / `l` | Expand or collapse the date/app/agent tree |
 | `[` / `]` | Select category |
-| `Enter` | Open the selected file |
-| `/` | Filter loaded records |
+| `Enter` | Open the selected node, or filter the logs to the selected agent |
+| `/` | Filter loaded records. In the prompt, `tab` switches scope and `ctrl+r` switches to a regular expression |
 | `esc` | Clear the filter |
 | `w` | Show or hide line wrapping |
 | `g` | Show or hide the ingest graph |
-| `t` | Cycle the log time window |
+| `t` | Cycle the log time window: 5m, 1h, 24h, all. The default is all |
 | `r` | Rescan storage |
 | `?` | Keybindings |
 | `q`, `ctrl+c` | Quit the server |
