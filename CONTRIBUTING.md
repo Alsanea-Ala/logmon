@@ -140,6 +140,29 @@ and no GitHub Release. "Quietly" is load-bearing: the version step publishes no
 `steps.bump.outputs.version != ''`, because exiting that one step does not stop
 the ones after it.
 
+### The `ci` scope is the release switch
+
+A change to the pipeline has two possible subjects, and which one you pick
+decides whether it ships:
+
+| Subject | Bump | Use for |
+|---|---|---|
+| `ci: ...` | none | pipeline changes that make an *existing* pending release work |
+| `fix(ci): ...` | patch | a pipeline change you want published as a build |
+
+`fix(ci):` matches the `fix` rule on its type, not on its scope, so it cuts a
+patch release like any other fix. `ci:` matches nothing and the job skips.
+
+The distinction is worth being deliberate about, because it is the only
+mechanism that turns a pipeline change into a release. Typing `fix(ci):` on a
+commit that is merely unblocking something already pending ships a build whose
+only content is the fix that unblocked it.
+
+Note that the scope does not affect the changelog filters on its own: both
+`.goreleaser.yaml` and `cliff.toml` match on the type, so `fix(ci):` reaches
+release notes unless a `^fix\(ci\):` filter is added to both. Keep those two
+lists identical when you do.
+
 The rules live in a shell script inside `release-tag.yml` and are covered by
 `internal/ci`, which extracts the script from the workflow and runs it against
 crafted git histories. Three bugs shipped there in a row, all silent — the job
