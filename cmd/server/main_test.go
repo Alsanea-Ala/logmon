@@ -18,7 +18,7 @@ func TestConfigPrecedence(t *testing.T) {
 	}
 
 	var got server.Config
-	cmd := newCommand(func(_ context.Context, cfg server.Config, _ bool) error {
+	cmd := newCommand(func(_ context.Context, cfg server.Config, _ bool, _ string) error {
 		got = cfg
 		return nil
 	})
