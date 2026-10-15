@@ -606,6 +606,35 @@ Parsing is strict: an unknown key or an unknown colour or border name is
 rejected, and the server starts on defaults with a visible `GUI config` line in
 the log panel. A silently ignored typo is the failure that costs an afternoon.
 
+### Colours used as backgrounds must be 16-255
+
+Indices 0-15 are the sixteen ANSI colours, and your terminal is free to remap all
+of them. Indices 16-255 are fixed RGB in the xterm palette and render the same
+everywhere.
+
+For a foreground this does not matter much: a border that comes out a different
+green than you expected still reads as a border. For a background it matters a
+lot, because the text sitting on top of it was chosen to contrast with a colour
+nobody could predict.
+
+`selectedBg` is the only background the TUI sets. Set it in 16-255:
+
+```yaml
+gui:
+  theme:
+    selectedBg: 236    # good, fixed #303030
+    selectedFg: 255    # good, fixed #eeeeee
+    # selectedBg: blue  -- index 4, your theme decides what that is
+```
+
+The default is `236` with `255` on top, which is 11.38:1. The previous default
+was index 4, and on a terminal theme that maps blue to a light blue that gave
+2.67:1 — unreadable, and impossible to detect from the source because whether it
+happens depends on someone else's theme file.
+
+A test enforces the range on every background the palette uses, so this cannot
+regress silently.
+
 `r` re-reads the file, so editing the appearance and pressing `r` is the whole
 workflow. It also resets `g` and `w` to whatever the file says: the file wins,
 always, which is one rule rather than two.
