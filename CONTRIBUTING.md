@@ -135,7 +135,16 @@ the previous `chore: vX.Y.Z` commit and applies these rules, in order:
 
 Major wins over minor and patch. A range with no release-worthy commit exits
 quietly — that is why a run of `docs:` and `chore:` merges produces no version
-and no GitHub Release.
+and no GitHub Release. "Quietly" is load-bearing: the version step publishes no
+`version` output, and every step after it is gated on
+`steps.bump.outputs.version != ''`, because exiting that one step does not stop
+the ones after it.
+
+The rules live in a shell script inside `release-tag.yml` and are covered by
+`internal/ci`, which extracts the script from the workflow and runs it against
+crafted git histories. Three bugs shipped there in a row, all silent — the job
+went green, or failed somewhere other than the cause. Run `go test ./internal/ci`
+after editing that script.
 
 The first release is `v0.1.0` regardless of history. The rules apply from the
 second release onward, because applying them to an untagged project would

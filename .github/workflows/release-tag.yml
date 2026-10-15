@@ -48,11 +48,11 @@ jobs:
       # inputs are version, config, args and github_token), so it needs the
       # version that step computes.
 
+      # Publishes `version` only when the range is actually release-worthy.
+      # Every later step is gated on that output being non-empty, so leaving it
+      # unset is what makes this job a no-op instead of a failed run.
       - id: bump
         name: classify commits and compute the next version
-        env:
-          # Not an error: a run of docs and chore commits is not a release.
-          NO_RELEASE: exit 0
         run: |
           set -euo pipefail
 
@@ -131,7 +131,18 @@ jobs:
 
           if [ "$BUMP" = none ]; then
             echo "no release-worthy commit in this range, stopping"
-            echo "$NO_RELEASE"
+            # A real exit, not a printed one. This used to be
+            # `echo "$NO_RELEASE"` with NO_RELEASE="exit 0", which wrote the
+            # text to stdout and fell through -- so the job went on to compute
+            # a version from the range it had just rejected, and shipped
+            # whatever the old tag implied. Printing a command is not running
+            # it, and nothing in the log said otherwise.
+            #
+            # Exiting 0 rather than 1 is deliberate: a range of docs and chore
+            # commits is not a failure. But it only skips THIS step, so the
+            # steps after it carry `if: steps.bump.outputs.version != ''`.
+            # `version` is never written on this path, so those steps skip.
+            exit 0
           fi
 
           # ---- version ------------------------------------------------
@@ -151,6 +162,19 @@ jobs:
             VERSION="v$MAJ.$MI.$PA"
           fi
           echo "bump: $BUMP -> $VERSION"
+
+          # Refuse to reuse a version that is already tagged, rather than
+          # letting `git tag -a` fail three steps later with a bare
+          # "fatal: tag 'vX.Y.Z' already exists" that does not say why. A
+          # collision means the previous release did not land as intended --
+          # usually a release commit missing from main -- so say so instead of
+          # failing obscurely three steps later.
+          if git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null; then
+            echo "tag $VERSION already exists; refusing to reuse it" >&2
+            echo "check whether that release's chore commit reached main" >&2
+            exit 1
+          fi
+
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       # Adds the new release above the existing ones.
@@ -167,6 +191,10 @@ jobs:
       # Its default, git-cliff/CHANGELOG.md, differs from the prepend target,
       # which is what has to happen. run.sh mkdirs it before invoking.
       - name: update CHANGELOG.md
+        # Skipped when the bump step found nothing to release. `exit 0` in that
+        # step skips only itself, so without this guard the remaining steps
+        # would still run against an empty version.
+        if: steps.bump.outputs.version != ''
         uses: orhun/git-cliff-action@v4
         with:
           config: cliff.toml
@@ -179,9 +207,11 @@ jobs:
       # checks out a sha rather than a branch. Every git command in the next
       # step would then work against a detached ref, so name it before use.
       - name: attach the tested commit to a branch
+        if: steps.bump.outputs.version != ''
         run: git checkout -B "release/${{ steps.bump.outputs.version }}"
 
       - name: commit, tag, push, dispatch
+        if: steps.bump.outputs.version != ''
         env:
           VERSION: ${{ steps.bump.outputs.version }}
           GH_TOKEN: ${{ github.token }}
