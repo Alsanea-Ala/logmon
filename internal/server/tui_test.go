@@ -138,6 +138,7 @@ func TestViewRendersHeader(t *testing.T) {
 		{"medium", 100, 30},
 		{"narrow", 80, 24},
 		{"short", 120, 14},
+		{"minheight", 120, 15},
 		{"tiny", 20, 5},
 	}
 	for _, size := range sizes {
@@ -181,7 +182,7 @@ func TestViewFitsTerminal(t *testing.T) {
 		{"stacked", 90, 20},
 		{"narrow", 80, 24},
 		{"small", 60, 18},
-		{"short", 45, 12},
+		{"short", 45, 14},
 	}
 	for _, size := range sizes {
 		t.Run(size.name, func(t *testing.T) {
@@ -227,7 +228,7 @@ func TestResizeKeepsFrameValid(t *testing.T) {
 		{Width: 200, Height: 50},
 		{Width: 60, Height: 20},
 		{Width: 120, Height: 30},
-		{Width: 45, Height: 12},
+		{Width: 45, Height: 14},
 	}
 	m := newModel(t.TempDir())
 	m.agents["prod-1"] = agentStatus{ID: "prod-1", Hostname: "web-01", Connected: true}
