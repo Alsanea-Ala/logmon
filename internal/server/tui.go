@@ -176,79 +176,95 @@ type model struct {
 	filtering     bool
 	filterBuffer  string
 	agentFilter   string // filter logs by agent ID
+
+	// Palette and chrome. p is the single source of colour truth; every style
+	// below is built from it rather than carrying its own literals.
+	p           palette
+	borderStyle lipgloss.Border
+	showHelp    bool
 }
 
 func newModel(dataDir string) *model {
 	return &model{
-		dataDir:    dataDir,
-		categories: []string{"all"},
-		agents:     make(map[string]agentStatus),
-		focus:      focusSidebar,
+		dataDir:     dataDir,
+		categories:  []string{"all"},
+		agents:      make(map[string]agentStatus),
+		focus:       focusSidebar,
+		p:           defaultPalette,
+		borderStyle: lipgloss.RoundedBorder(),
 	}
 }
 
-// Styles
-var (
-	sidebarStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("240")).
-			Padding(0, 1)
+// palette holds every colour the TUI uses.
+//
+// Values are 256-colour indices rather than names so they render identically
+// on any terminal that speaks the xterm palette. The bright variants are used
+// where a dim one would disappear against a light background: a focused border
+// has to be unmistakable, and a border is the only cue for which panel has
+// keyboard focus.
+//
+// There is no config file for this yet. The struct is the seam one would attach
+// to, so adding a reader later means changing where defaultPalette comes from
+// rather than hunting for literals.
+type palette struct {
+	BorderActive   lipgloss.TerminalColor // focused panel edge
+	BorderInactive lipgloss.TerminalColor // unfocused panel edge
+	SelectedBg     lipgloss.TerminalColor // highlighted row inside a panel
+	OptionsText    lipgloss.TerminalColor // bottom bar
+	Title          lipgloss.TerminalColor // panel titles, headings
+	Muted          lipgloss.TerminalColor // timestamps, dimmed metadata
+	Accent         lipgloss.TerminalColor // section headings, categories
+	Ok             lipgloss.TerminalColor // connected agent
+	Warn           lipgloss.TerminalColor // degraded state
+	Err            lipgloss.TerminalColor // errors, disconnected agent
+	SelectedFg     lipgloss.TerminalColor // text on SelectedBg
+}
 
-	mainStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("240")).
-			Padding(0, 1)
+var defaultPalette = palette{
+	BorderActive:   lipgloss.Color("10"),
+	BorderInactive: lipgloss.Color("240"),
+	SelectedBg:     lipgloss.Color("4"),
+	OptionsText:    lipgloss.Color("4"),
+	Title:          lipgloss.Color("15"),
+	Muted:          lipgloss.Color("244"),
+	Accent:         lipgloss.Color("39"),
+	Ok:             lipgloss.Color("46"),
+	Warn:           lipgloss.Color("214"),
+	Err:            lipgloss.Color("196"),
+	SelectedFg:     lipgloss.Color("230"),
+}
 
-	focusedSidebarStyle = lipgloss.NewStyle().
-				Border(lipgloss.RoundedBorder()).
-				BorderForeground(lipgloss.Color("39")).
-				Padding(0, 1)
+// Styles derived from the palette. Built on demand rather than stored, so a
+// model carrying a different palette renders consistently.
+func (p palette) styles() styles {
+	return styles{
+		sectionTitle: lipgloss.NewStyle().Bold(true).Foreground(p.Accent),
+		selected:     lipgloss.NewStyle().Foreground(p.SelectedFg).Background(p.SelectedBg),
+		connected:    lipgloss.NewStyle().Foreground(p.Ok),
+		offline:      lipgloss.NewStyle().Foreground(p.BorderInactive),
+		error:        lipgloss.NewStyle().Foreground(p.Err),
+		statusBar:    lipgloss.NewStyle().Foreground(p.OptionsText),
+		category:     lipgloss.NewStyle().Foreground(p.Accent),
+		time:         lipgloss.NewStyle().Foreground(p.Muted),
+		divider:      lipgloss.NewStyle().Foreground(p.BorderInactive),
+		header:       lipgloss.NewStyle().Bold(true).Foreground(p.Title),
+		helpKey:      lipgloss.NewStyle().Bold(true).Foreground(p.Accent),
+	}
+}
 
-	focusedMainStyle = lipgloss.NewStyle().
-				Border(lipgloss.RoundedBorder()).
-				BorderForeground(lipgloss.Color("39")).
-				Padding(0, 1)
-
-	sectionTitleStyle = lipgloss.NewStyle().
-				Bold(true).
-				Foreground(lipgloss.Color("39"))
-
-	selectedStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("230")).
-			Background(lipgloss.Color("39"))
-
-	connectedStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("46"))
-
-	offlineStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("240"))
-
-	errorStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("196"))
-
-	// filterStyle marks the active filter. No background fill: the chrome
-	// bars stay transparent so only the text colour carries meaning.
-	filterStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("15"))
-
-	statusBarStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("15"))
-
-	categoryStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("205"))
-
-	timeStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("244"))
-
-	dividerStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("240"))
-
-	headerStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("15")).
-			Padding(0, 1)
-)
+type styles struct {
+	sectionTitle lipgloss.Style
+	selected     lipgloss.Style
+	connected    lipgloss.Style
+	offline      lipgloss.Style
+	error        lipgloss.Style
+	statusBar    lipgloss.Style
+	category     lipgloss.Style
+	time         lipgloss.Style
+	divider      lipgloss.Style
+	header       lipgloss.Style
+	helpKey      lipgloss.Style
+}
 
 func (m *model) Init() tea.Cmd {
 	return m.scan()
@@ -337,9 +353,26 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleFilterInput(msg)
 	}
 
+	// The overlay swallows everything except the keys that dismiss it, so a
+	// stray "j" cannot move the cursor behind it.
+	if m.showHelp {
+		switch msg.String() {
+		case "?", "esc", "q", "ctrl+c":
+			m.showHelp = false
+		}
+		if msg.String() == "q" || msg.String() == "ctrl+c" {
+			return m, tea.Quit
+		}
+		return m, nil
+	}
+
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return m, tea.Quit
+
+	case "?":
+		m.showHelp = true
+		return m, nil
 
 	case "tab":
 		m.focus = 1 - m.focus
@@ -628,7 +661,7 @@ func (m *model) View() string {
 
 	// Flat header bar: no forced width, so no trailing background padding.
 	headerText := fmt.Sprintf(" LOGMON DASHBOARD  |  v%s ", Version)
-	header := headerStyle.Render(headerText)
+	header := m.p.styles().header.Render(headerText)
 
 	// Status bar (minimal on narrow terminals)
 	statusBar := m.renderStatusBar(lay.stacked)
@@ -646,9 +679,25 @@ func (m *model) View() string {
 	// Tight assembly: header sits flush above the panels.
 	frame := header + "\n" + content + "\n" + statusBar
 
+	// The overlay replaces the panels rather than drawing over them: a
+	// half-visible frame behind a help screen reads as a rendering bug, and
+	// the header and status bar are still worth keeping for context.
+	if m.showHelp {
+		frame = header + "\n" + m.renderHelp(m.width, availHeight(lay)) + "\n" + statusBar
+	}
+
 	// Never emit more rows than the terminal has: an overflowing frame
 	// scrolls the header off the top.
 	return clampHeight(frame, h)
+}
+
+// availHeight is the row budget the panels share: the terminal minus the
+// header and the status bar.
+func availHeight(lay layout) int {
+	if lay.mainH < 1 {
+		return 1
+	}
+	return lay.mainH
 }
 
 // clampHeight clips s to at most rows lines while preserving the first row
@@ -681,11 +730,151 @@ func clampHeight(s string, rows int) string {
 	return strings.Join(out, "\n")
 }
 
-func (m *model) renderSidebar(width, height int) string {
-	style := sidebarStyle
-	if m.focus == focusSidebar {
-		style = focusedSidebarStyle
+// fitLine clips s to w display cells and pads it out to exactly w.
+//
+// ANSI-safe, unlike truncateText: rows arriving here are already styled, and
+// slicing by rune would cut an escape sequence in half and leak the remainder
+// as visible garbage. MaxWidth does the clipping with escape sequences intact.
+func fitLine(s string, w int) string {
+	if w <= 0 {
+		return ""
 	}
+	got := lipgloss.Width(s)
+	if got > w {
+		return lipgloss.NewStyle().MaxWidth(w).Render(s)
+	}
+	if pad := w - got; pad > 0 {
+		return s + strings.Repeat(" ", pad)
+	}
+	return s
+}
+
+// panel draws a titled box around body and returns exactly w by h cells.
+//
+// The frame is built here rather than by lipgloss because lipgloss v1 has no
+// border title: BorderTop only turns the edge on or off. Splicing a title into
+// a rendered border is not an option either, since the border is coloured and
+// the ANSI escapes make byte offsets into that line meaningless.
+//
+// The body keeps using lipgloss upstream, which still owns wrapping; this only
+// adds the frame and guarantees the row count, so a panel can never come out
+// taller than the terminal and push the status bar out of view.
+func panel(title, body string, w, h int, b lipgloss.Border, active bool, p palette) string {
+	if w < 1 {
+		w = 1
+	}
+	if h < 1 {
+		h = 1
+	}
+
+	// A border with no corner characters is the hidden style: no frame, no
+	// padding, the body is the whole panel.
+	framed := b.TopLeft != "" || b.Left != ""
+	const padding = 2 // one space of padding each side
+
+	frameW, innerW := 0, w
+	innerH := h
+	if framed {
+		frameW = 2
+		innerW = w - frameW - padding
+		if innerH = h - 2; innerH < 1 {
+			innerH = 1
+		}
+	}
+	if innerW < 1 {
+		innerW = 1
+	}
+
+	edge := p.BorderInactive
+	if active {
+		edge = p.BorderActive
+	}
+	edgeStyle := lipgloss.NewStyle().Foreground(edge)
+	if active {
+		edgeStyle = edgeStyle.Bold(true)
+	}
+
+	top, bottom, left, right := b.Top, b.Bottom, b.Left, b.Right
+	if top == "" {
+		top = b.Middle
+	}
+	if bottom == "" {
+		bottom = top
+	}
+
+	rows := strings.Split(body, "\n")
+	out := make([]string, 0, h)
+
+	if framed {
+		// The top and bottom edges span the full interior, padding included:
+		// two border cells plus w-2. Filling them with innerW instead leaves
+		// both edges two cells short of the body rows between them, and the
+		// panel comes out visibly misaligned.
+		span := w - frameW
+		if span < 1 {
+			span = 1
+		}
+
+		var head strings.Builder
+		head.WriteString(edgeStyle.Render(corner(b.TopLeft)))
+		if title != "" {
+			label := " " + title + " "
+			if lipgloss.Width(label) > span {
+				label = fitLine(label, span)
+			}
+			head.WriteString(lipgloss.NewStyle().Foreground(p.Title).Render(label))
+			head.WriteString(edgeStyle.Render(strings.Repeat(top, max(span-lipgloss.Width(label), 0))))
+		} else {
+			head.WriteString(edgeStyle.Render(strings.Repeat(top, span)))
+		}
+		head.WriteString(edgeStyle.Render(corner(b.TopRight)))
+		out = append(out, head.String())
+	}
+
+	for i := 0; i < innerH; i++ {
+		content := ""
+		if i < len(rows) {
+			content = rows[i]
+		}
+		content = fitLine(content, innerW)
+		if !framed {
+			out = append(out, content)
+			continue
+		}
+		var row strings.Builder
+		row.WriteString(edgeStyle.Render(corner(left)))
+		row.WriteString(" ")
+		row.WriteString(content)
+		row.WriteString(" ")
+		row.WriteString(edgeStyle.Render(corner(right)))
+		out = append(out, row.String())
+	}
+
+	if framed {
+		var foot strings.Builder
+		foot.WriteString(edgeStyle.Render(corner(b.BottomLeft)))
+		foot.WriteString(edgeStyle.Render(strings.Repeat(bottom, max(w-frameW, 1))))
+		foot.WriteString(edgeStyle.Render(corner(b.BottomRight)))
+		out = append(out, foot.String())
+	}
+
+	return strings.Join(out, "\n")
+}
+
+// corner returns the first rune of a border edge, or a space when the border
+// leaves it blank.
+func corner(s string) string {
+	if s == "" {
+		return " "
+	}
+	for _, r := range s {
+		return string(r)
+	}
+	return " "
+}
+
+func (m *model) renderSidebar(width, height int) string {
+	st := m.p.styles()
 
 	innerWidth := width - textWidth
 	if innerWidth < 1 {
@@ -711,15 +900,15 @@ func (m *model) renderSidebar(width, height int) string {
 	for i, id := range agentIDs {
 		agent := m.agents[id]
 		state := "●"
-		stateStyle := connectedStyle
+		stateStyle := st.connected
 		if !agent.Connected {
 			state = "○"
-			stateStyle = offlineStyle
+			stateStyle = st.offline
 		}
 		plain := fmt.Sprintf("%s %s %s", state, agent.ID, safeText(agent.Hostname))
 		var line string
 		if m.focus == focusSidebar && i == m.sidebarIndex {
-			line = selectedStyle.Width(innerWidth).Render(truncateText(plain, innerWidth))
+			line = st.selected.Width(innerWidth).Render(truncateText(plain, innerWidth))
 		} else {
 			line = stateStyle.Render(state) + " " + truncateText(
 				fmt.Sprintf("%s %s", agent.ID, safeText(agent.Hostname)), innerWidth-2)
@@ -745,7 +934,7 @@ func (m *model) renderSidebar(width, height int) string {
 		}
 		line := indent + prefix + name
 		if m.focus == focusSidebar && unifiedIdx == m.sidebarIndex {
-			line = selectedStyle.Width(innerWidth).Render(truncateText(line, innerWidth))
+			line = st.selected.Width(innerWidth).Render(truncateText(line, innerWidth))
 		} else {
 			line = truncateText(line, innerWidth)
 		}
@@ -805,7 +994,7 @@ func (m *model) renderSidebar(width, height int) string {
 	// Lines are joined without a trailing newline: a trailing "\n" would add
 	// a phantom row that Height() cannot shrink, pushing the status bar off.
 	lines := make([]string, 0, rowBudget+2)
-	lines = append(lines, sectionTitleStyle.Render(" Agents "))
+	lines = append(lines, st.sectionTitle.Render(" Agents "))
 	if agentCount == 0 {
 		lines = append(lines, "  (none — start an agent)")
 	} else {
@@ -813,7 +1002,7 @@ func (m *model) renderSidebar(width, height int) string {
 			lines = append(lines, row.text)
 		}
 	}
-	lines = append(lines, sectionTitleStyle.Render(" Files "))
+	lines = append(lines, st.sectionTitle.Render(" Files "))
 	if len(m.treeFlattened) == 0 {
 		lines = append(lines, "  (no logs)")
 	} else {
@@ -822,7 +1011,7 @@ func (m *model) renderSidebar(width, height int) string {
 		}
 	}
 
-	return style.Width(width - chromeWidth).Height(height - chromeHeight).Render(strings.Join(lines, "\n"))
+	return panel("Sources", strings.Join(lines, "\n"), width, height, m.borderStyle, m.focus == focusSidebar, m.p)
 }
 
 func nodeDepth(node *fileNode) int {
@@ -849,10 +1038,7 @@ func truncateText(s string, width int) string {
 }
 
 func (m *model) renderMain(width, height int) string {
-	style := mainStyle
-	if m.focus == focusMain {
-		style = focusedMainStyle
-	}
+	st := m.p.styles()
 
 	innerWidth := width - textWidth
 	if innerWidth < 1 {
@@ -867,13 +1053,13 @@ func (m *model) renderMain(width, height int) string {
 	if len(m.files) > 0 {
 		file := m.files[m.fileIndex]
 		rows = append(rows, truncateText(
-			sectionTitleStyle.Render(fmt.Sprintf(" %s / %s / %s ", file.Date, file.App, file.Agent)), innerWidth))
+			st.sectionTitle.Render(fmt.Sprintf(" %s / %s / %s ", file.Date, file.App, file.Agent)), innerWidth))
 		chrome++
 		if cat := m.categories[m.categoryIndex]; cat != "all" {
-			rows = append(rows, categoryStyle.Render(" Category: "+cat))
+			rows = append(rows, st.category.Render(" Category: "+cat))
 			chrome++
 		}
-		rows = append(rows, dividerStyle.Render(strings.Repeat("─", innerWidth)))
+		rows = append(rows, st.divider.Render(strings.Repeat("─", innerWidth)))
 		chrome++
 	}
 
@@ -904,24 +1090,85 @@ func (m *model) renderMain(width, height int) string {
 			body := truncateText(safeText(rec.Line), max(1, innerWidth-lipgloss.Width(gutter)))
 
 			if i == m.lineIndex {
-				rows = append(rows, selectedStyle.Width(innerWidth).Render(gutter+body))
+				rows = append(rows, st.selected.Width(innerWidth).Render(gutter+body))
 			} else {
 				rows = append(rows, marker+
-					timeStyle.Render(stamp)+
-					categoryStyle.Render(fmt.Sprintf(" %-12s", category))+
+					st.time.Render(stamp)+
+					st.category.Render(fmt.Sprintf(" %-12s", category))+
 					body)
 			}
 		}
 	}
 
 	if m.err != nil {
-		rows = append(rows, errorStyle.Render("Error: "+m.err.Error()))
+		rows = append(rows, st.error.Render("Error: "+m.err.Error()))
 	}
 
-	return style.Width(width - chromeWidth).Height(height - chromeHeight).Render(strings.Join(rows, "\n"))
+	return panel("Logs", strings.Join(rows, "\n"), width, height, m.borderStyle, m.focus == focusMain, m.p)
+}
+
+// keybinding is one row of the help overlay.
+//
+// Declared as data rather than written into the renderer so the overlay, the
+// status bar and the test all read the same list. The status bar once
+// advertised "?: help" with nothing bound to "?", and no test compared the two;
+// TestHelpOverlayListsBindings now does.
+type keybinding struct {
+	keys   string
+	action string
+}
+
+var keybindings = []keybinding{
+	{"q, ctrl+c", "quit"},
+	{"?", "toggle this help"},
+	{"tab", "switch focus between panels"},
+	{"up, k", "move up"},
+	{"down, j", "move down"},
+	{"left, h", "collapse a node, or move focus"},
+	{"right, l", "expand a node, or move focus"},
+	{"enter", "open a node, or filter by the selected agent"},
+	{"r", "rescan storage"},
+	{"/", "filter records"},
+	{"esc", "clear the filter, or close this"},
+	{"[", "previous category"},
+	{"]", "next category"},
+}
+
+// renderHelp draws the keybinding overlay at exactly w by h.
+func (m *model) renderHelp(w, h int) string {
+	st := m.p.styles()
+
+	// Two columns when there is room, otherwise one. The overlay is a fixed
+	// list, so the column split only has to be legible, never interactive.
+	rows := make([]string, 0, len(keybindings))
+	perColumn := len(keybindings)
+	if w >= 72 {
+		perColumn = (len(keybindings) + 1) / 2
+	}
+	keyWidth := 0
+	for _, b := range keybindings {
+		if n := lipgloss.Width(b.keys); n > keyWidth {
+			keyWidth = n
+		}
+	}
+	for i := 0; i < perColumn; i++ {
+		left := helpRow(keybindings[i], keyWidth, st)
+		if i+perColumn < len(keybindings) {
+			left += "    " + helpRow(keybindings[i+perColumn], keyWidth, st)
+		}
+		rows = append(rows, left)
+	}
+
+	body := strings.Join(rows, "\n")
+	return panel("Keybindings", body, w, h, m.borderStyle, true, m.p)
+}
+
+func helpRow(b keybinding, keyWidth int, st styles) string {
+	return st.helpKey.Render(fitLine(b.keys, keyWidth)) + "  " + b.action
 }
 
 func (m *model) renderStatusBar(minimal bool) string {
+	st := m.p.styles()
 	connected := connectedCount(m.agents)
 	focusStr := map[focusPane]string{focusSidebar: "Sidebar", focusMain: "Logs"}[m.focus]
 
@@ -932,21 +1179,22 @@ func (m *model) renderStatusBar(minimal bool) string {
 	var hints []string
 	switch {
 	case minimal:
-		hints = []string{"Tab: switch", "q: quit", "?: help"}
+		hints = []string{"[Tab] switch", "[q] quit", "[?] help"}
 	case m.width < 100:
-		hints = []string{"Tab: switch", "↑↓/jk: nav", "←→: expand", "Enter: open", "q: quit", "r: refresh"}
+		hints = []string{"[Tab] switch", "[↑↓/jk] nav", "[←→] expand", "[Enter] open", "[q] quit", "[?] help"}
 	default:
-		hints = []string{"Tab: switch", "↑↓/jk: nav", "←→/hl: expand", "Enter: open", "q: quit", "r: refresh", "/: filter"}
+		hints = []string{"[Tab] switch", "[↑↓/jk] nav", "[←→/hl] expand", "[Enter] open",
+			"[/] filter", "[r] refresh", "[?] help", "[q] quit"}
 	}
 
-	counters := fmt.Sprintf("Agents: %d/%d  |  Files: %d  |  Focus: %s",
+	counters := fmt.Sprintf("Agents: %d/%d   Files: %d   Focus: %s",
 		connected, len(m.agents), len(m.files), focusStr)
 
 	var bar string
 	if m.filtering {
-		bar = " Filter: " + filterStyle.Render(m.filterBuffer+"_")
+		bar = " Filter: " + st.error.Render(m.filterBuffer+"_")
 	} else if m.filter != "" {
-		bar = " Filter: " + filterStyle.Render(m.filter) + "  (esc to clear)"
+		bar = " Filter: " + st.error.Render(m.filter) + "  (esc to clear)"
 	}
 
 	if bar == "" {
@@ -955,7 +1203,7 @@ func (m *model) renderStatusBar(minimal bool) string {
 		budget := m.width - statusBarPadding
 		bar = counters
 		for _, hint := range hints {
-			candidate := bar + "  |  " + hint
+			candidate := bar + "   " + hint
 			if lipgloss.Width(candidate) > budget {
 				break
 			}
@@ -967,7 +1215,9 @@ func (m *model) renderStatusBar(minimal bool) string {
 	}
 
 	// MaxWidth guarantees a single line: it clips instead of wrapping.
-	return statusBarStyle.MaxWidth(m.width).Render(truncateText(bar, m.width))
+	// Foreground only. A background here would fill the last row of the frame,
+	// which TestChromeHasNoBackground rejects.
+	return st.statusBar.MaxWidth(m.width).Render(truncateText(bar, m.width))
 }
 
 func (m *model) loadSelected() tea.Cmd {
