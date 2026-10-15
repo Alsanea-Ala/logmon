@@ -125,7 +125,10 @@ func collectFile(ctx context.Context, source Source, state *sourceState, records
 			if line.Err != nil {
 				return line.Err
 			}
-			if err := emit(ctx, records, source, line.Text, nil); err != nil {
+			// A file source states no severity. Word matching stays on the
+			// server, where the heuristic lives for records with nothing
+			// stated, so there is only ever one copy of the keyword table.
+			if err := emit(ctx, records, source, line.Text, "", nil); err != nil {
 				return err
 			}
 			location := line.SeekInfo
@@ -183,13 +186,13 @@ func collectCommand(ctx context.Context, source Source, state *sourceState, reco
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 64*1024), protocol.MaxFrameSize)
 	for scanner.Scan() {
-		line, sourceTime, cursor, err := parseCommandLine(source.Type, scanner.Text())
+		line, sourceTime, cursor, level, err := parseCommandLine(source.Type, scanner.Text())
 		if err != nil {
 			cancel()
 			<-waited
 			return err
 		}
-		if err := emit(ctx, records, source, line, sourceTime); err != nil {
+		if err := emit(ctx, records, source, line, level, sourceTime); err != nil {
 			cancel()
 			<-waited
 			return err
@@ -216,43 +219,94 @@ func collectCommand(ctx context.Context, source Source, state *sourceState, reco
 	return fmt.Errorf("%s stopped", name)
 }
 
-func parseCommandLine(kind, line string) (string, *time.Time, string, error) {
+// parseCommandLine pulls the parts of a command's output line that a record
+// needs: the message, the source's own timestamp, the journald cursor, and the
+// severity the source stated.
+//
+// Level is verbatim or empty. journald's PRIORITY is a syslog number and is
+// carried as-is; docker has no severity and gets none. Interpreting the number
+// is the server's job, because a stored record should say what the source said
+// rather than what this agent decided that meant.
+func parseCommandLine(kind, line string) (text string, sourceTime *time.Time, cursor, level string, err error) {
 	if kind == "docker" {
-		stamp, text, found := strings.Cut(line, " ")
+		stamp, rest, found := strings.Cut(line, " ")
 		if !found {
-			return line, nil, "", nil
+			return line, nil, "", "", nil
 		}
-		parsed, err := time.Parse(time.RFC3339Nano, stamp)
-		if err != nil {
-			return line, nil, "", nil
+		parsed, parseErr := time.Parse(time.RFC3339Nano, stamp)
+		if parseErr != nil {
+			return line, nil, "", "", nil
 		}
-		return text, &parsed, "", nil
+		return rest, &parsed, "", "", nil
 	}
 
 	var entry struct {
 		Message  json.RawMessage `json:"MESSAGE"`
 		Realtime string          `json:"__REALTIME_TIMESTAMP"`
 		Cursor   string          `json:"__CURSOR"`
+		Priority json.RawMessage `json:"PRIORITY"`
 	}
 	if err := json.Unmarshal([]byte(line), &entry); err != nil {
-		return "", nil, "", fmt.Errorf("decode journal entry: %w", err)
+		return "", nil, "", "", fmt.Errorf("decode journal entry: %w", err)
 	}
-	var message string
-	if err := json.Unmarshal(entry.Message, &message); err != nil {
-		message = string(entry.Message)
+	// MESSAGE is a string for almost every entry and a JSON array of bytes for
+	// entries logged with non-UTF-8 data.
+	if err := json.Unmarshal(entry.Message, &text); err != nil {
+		text = string(entry.Message)
 	}
+
+	level = journalPriority(entry.Priority)
+
 	if entry.Realtime == "" {
-		return message, nil, entry.Cursor, nil
+		return text, nil, entry.Cursor, level, nil
 	}
-	microseconds, err := strconv.ParseInt(entry.Realtime, 10, 64)
-	if err != nil {
-		return "", nil, "", fmt.Errorf("decode journal timestamp: %w", err)
+	microseconds, parseErr := strconv.ParseInt(entry.Realtime, 10, 64)
+	if parseErr != nil {
+		return "", nil, "", "", fmt.Errorf("decode journal timestamp: %w", parseErr)
 	}
 	stamp := time.UnixMicro(microseconds).UTC()
-	return message, &stamp, entry.Cursor, nil
+	return text, &stamp, entry.Cursor, level, nil
 }
 
-func emit(ctx context.Context, records chan<- protocol.Record, source Source, line string, sourceTime *time.Time) error {
+// journalPriority normalises journald's PRIORITY to the string that goes on the
+// wire.
+//
+// journalctl emits it as a JSON number, but the field is typed as a string in
+// some journal versions and configurations emit the name. Both are accepted, and
+// anything else is treated as "not stated" rather than passed through: a value
+// the server cannot map must not look like one it can.
+func journalPriority(raw json.RawMessage) string {
+	// null is checked before the number decode, and it has to be. Unmarshalling
+	// JSON null into an int succeeds and leaves the value at zero, and zero is
+	// emerg, so without this every entry with PRIORITY null would be coloured
+	// as the most severe level syslog has.
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var number int
+	if err := json.Unmarshal(raw, &number); err == nil {
+		if number < 0 || number > 7 {
+			return ""
+		}
+		return strconv.Itoa(number)
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		text = strings.TrimSpace(text)
+		if text == "" || len(text) > protocol.MaxLevelSize {
+			return ""
+		}
+		return text
+	}
+	return ""
+}
+
+// emit sends one line to the channel, splitting it if it is over the frame size.
+//
+// level is carried on every fragment: a line too long to send in one frame is
+// one log entry, and colouring only its first fragment would make the rest look
+// like unrelated unlabelled lines.
+func emit(ctx context.Context, records chan<- protocol.Record, source Source, line, level string, sourceTime *time.Time) error {
 	for {
 		end := min(len(line), protocol.MaxLineSize)
 		for end < len(line) && end > 0 && line[end]&0xc0 == 0x80 {
@@ -262,7 +316,14 @@ func emit(ctx context.Context, records chan<- protocol.Record, source Source, li
 			end = min(len(line), protocol.MaxLineSize)
 		}
 		select {
-		case records <- protocol.Record{Source: source.Type, App: source.App, Category: source.Category, Line: line[:end], SourceTime: sourceTime}:
+		case records <- protocol.Record{
+			Source:     source.Type,
+			App:        source.App,
+			Category:   source.Category,
+			Line:       line[:end],
+			Level:      level,
+			SourceTime: sourceTime,
+		}:
 			if end == len(line) {
 				return nil
 			}

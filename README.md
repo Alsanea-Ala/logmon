@@ -699,6 +699,44 @@ not move the panels. There is no surplus to redistribute at those sizes, so
 rebalancing would resize the stack on every `tab` to reach a worse result. This
 is the same guard `TestNarrowLayoutGivesLogsRoom` covers.
 
+## Severity
+
+Log lines are badged `ERR`, `WRN`, `INF` or `DBG` and coloured to match. There
+are two sources for that, and the order matters.
+
+**What the source stated wins.** A `journald` source carries the entry's
+`PRIORITY` — syslog's own number, 0 `emerg` through 7 `debug` — through to
+storage. It goes on the wire verbatim, unmapped, because a stored record should
+say what the source said rather than what this software decided that meant.
+
+Syslog's eight levels collapse onto four for display: `emerg`, `alert`, `crit`
+and `err` all read as an error to an operator, and anything finer would need a
+fifth colour to be visible anyway.
+
+```text
+priority  0  1  2  3  4       5     6     7
+badge     ERR ERR ERR ERR WRN  INF   INF   DBG
+```
+
+**Otherwise the text is scanned.** `file` and `docker` sources state no
+severity, and neither does any record written before this field existed. Those
+fall back to matching whole words in the line, highest level first, so
+`"error: failed to connect"` is an error rather than a warning.
+
+The heuristic is a guess and it is wrong often enough to be worth knowing about.
+`no errors in the last hour` is not an error, and neither is a line mentioning
+the path `/var/log/errors/`. It matches on whole words, so `erroneous_value`
+does not match, but prose about errors still will.
+
+A level the server cannot read — an out-of-range number, or a name it does not
+know — falls back to the text as well, rather than rendering nothing. A source
+saying something this version has not heard of should not make a line invisible.
+
+Nothing needs migrating. The field is `omitempty`, so a record with no stated
+level is byte-identical to what an older agent sent, and `protocol.Version` is
+still 1 because the old shape did not change: an absent field means "not
+stated", which is exactly what every existing record already meant.
+
 ## Filtering
 
 The filter narrows the panel as you type. Both halves of the query are shown in
