@@ -509,10 +509,24 @@ type palette struct {
 	SelectedFg     lipgloss.TerminalColor // text on SelectedBg
 }
 
+// defaultPalette is what the GUI looks like with no config file.
+//
+// Colours that are only ever a foreground are free to sit in 0-15, the ANSI
+// range that a terminal theme remaps: a border that comes out a different green
+// than you expected still reads as a border.
+//
+// SelectedBg is the exception, and the only background in the palette. It must
+// stay in 16-255, the part of the xterm palette that is fixed RGB and identical
+// on every terminal. It was "4", and "4" is the ANSI blue, so the selection bar
+// took whatever the user's theme decided blue was. On a theme that maps it to a
+// light blue, SelectedFg "230" on top gave 2.67:1 — below WCAG AA for normal
+// text and below AA-large for large text. It is not knowable at build time
+// whether a given theme will do this, which is why the rule is the range and
+// not the specific value.
 var defaultPalette = palette{
 	BorderActive:   lipgloss.Color("10"),
 	BorderInactive: lipgloss.Color("240"),
-	SelectedBg:     lipgloss.Color("4"),
+	SelectedBg:     lipgloss.Color("236"),
 	OptionsText:    lipgloss.Color("4"),
 	Title:          lipgloss.Color("15"),
 	Muted:          lipgloss.Color("244"),
@@ -520,7 +534,7 @@ var defaultPalette = palette{
 	Ok:             lipgloss.Color("46"),
 	Warn:           lipgloss.Color("214"),
 	Err:            lipgloss.Color("196"),
-	SelectedFg:     lipgloss.Color("230"),
+	SelectedFg:     lipgloss.Color("255"),
 }
 
 // Styles derived from the palette. Built on demand rather than stored, so a
